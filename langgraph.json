@@ -1,0 +1,11 @@
+{
+    "dockerfile_lines": [],
+    "graphs": {
+      "eventstorming_generator": "./src/eventstorming_generator/graph.py:graph"
+    },
+    "python_version": "3.11",
+    "env": "./.env",
+    "dependencies": [
+      "."
+    ]
+  }

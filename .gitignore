@@ -1,0 +1,39 @@
+# Environment
+.env
+.venv
+venv/
+.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+server.log
+
+# Temporary
+.temp
+.cache
+.langgraph_api
+.auth
+
+# Firebase
+firebase-credentials.json
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,40 @@
+[project]
+name = "msaez-project-generator"
+version = "1.0.0"
+description = "LangGraph-based UserStory Generator for Event Storming automation"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "convert-case>=1.2.3",
+    "firebase-admin>=6.8.0",
+    "flask>=3.1.1",
+    "kubernetes>=31.1.0",
+    "langchain-community>=0.3.23",
+    "langchain[openai]>=0.3.25",
+    "langgraph>=0.4.2",
+    "langsmith>=0.3.42",
+    "python-dotenv>=1.1.0",
+    "requests>=2.32.3",
+]
+
+[project.optional-dependencies]
+dev = ["mypy>=1.11.1", "ruff>=0.6.1"]
+
+[build-system]
+requires = ["setuptools>=73.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["project_generator"]
+
+[tool.setuptools.package-dir]
+"project_generator" = "src/project_generator"
+
+[tool.setuptools.package-data]
+"*" = ["py.typed"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D", "UP"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"

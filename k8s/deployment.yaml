@@ -1,0 +1,161 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: project-generator
+  labels:
+    app: project-generator
+spec:
+  replicas: 1  # 각 Pod의 AutoScaler가 관리하므로 초기값을 1로 설정
+  selector:
+    matchLabels:
+      app: project-generator
+  template:
+    metadata:
+      labels:
+        app: project-generator
+    spec:
+      serviceAccountName: project-generator
+      terminationGracePeriodSeconds: 7200  # 2시간 (작업 완료를 위한 충분한 시간)
+      containers:
+      - name: project-generator
+        image: asia-northeast3-docker.pkg.dev/eventstorming-tool-db/eventstorming-repo/project-generator:latest
+        ports:
+        - containerPort: 2024
+        env:
+        - name: AI_MODEL
+          value: "google_genai:gemini-flash-latest:thinking"
+        - name: AI_MODEL_MAX_INPUT_LIMIT
+          value: "983040"
+        - name: AI_MODEL_MAX_BATCH_SIZE
+          value: "30"
+
+        - name: AI_MODEL_LIGHT
+          value: "google_genai:gemini-flash-latest:thinking"
+        - name: AI_MODEL_LIGHT_MAX_INPUT_LIMIT
+          value: "983040"
+        - name: AI_MODEL_LIGHT_MAX_BATCH_SIZE
+          value: "60"
+
+        - name: GOOGLE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: GOOGLE_API_KEY
+        
+        - name: LANGSMITH_TRACING
+          value: "true"
+        - name: LANGSMITH_PROJECT
+          value: "msaez-automate-eventstorming-generator"
+        - name: LANGSMITH_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: LANGSMITH_API_KEY
+        
+        - name: FIREBASE_SERVICE_ACCOUNT_PATH
+          value: "./.auth/serviceAccountKey.json"
+        - name: FIREBASE_DATABASE_URL
+          value: "https://eventstorming-tool-db.firebaseio.com"
+        
+        - name: NAMESPACE
+          value: "user_story_generator"
+        - name: POD_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: IS_LOCAL_RUN
+          value: "false"
+
+        - name: AUTO_SCALE_NAMESPACE
+          value: "default"
+        - name: AUTO_SCALE_DEPLOYMENT_NAME
+          value: "project-generator"
+        - name: AUTO_SCALE_SERVICE_NAME
+          value: "project-generator-service"
+        - name: AUTO_SCALE_MIN_REPLICAS
+          value: "1"
+        - name: AUTO_SCALE_MAX_REPLICAS
+          value: "3"
+        - name: AUTO_SCALE_TARGET_JOBS_PER_POD
+          value: "1"
+
+        - name: LOG_LEVEL
+          value: "INFO"
+        
+        volumeMounts:
+        - name: firebase-key-volume
+          mountPath: /app/.auth
+          readOnly: true
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "200m"
+          limits:
+            memory: "1Gi"
+            cpu: "300m"
+        livenessProbe:
+          httpGet:
+            path: /ok
+            port: 2024
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ok
+            port: 2024
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: firebase-key-volume
+        secret:
+          secretName: firebase-key
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: project-generator-service
+spec:
+  selector:
+    app: project-generator
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 2024
+  type: ClusterIP
+
+---
+# ServiceAccount for project-generator (자동 스케일링 권한 포함)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: project-generator
+  namespace: default
+
+---
+# ClusterRole for project-generator (Pod 조회 및 Deployment 수정 권한)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: project-generator
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "list", "watch", "patch", "update"]
+
+---
+# ClusterRoleBinding for project-generator
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: project-generator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: project-generator
+subjects:
+- kind: ServiceAccount
+  name: project-generator
+  namespace: default 
