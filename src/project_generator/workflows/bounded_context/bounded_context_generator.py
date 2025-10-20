@@ -113,6 +113,7 @@ class BoundedContextWorkflow:
         language = "Korean" if has_korean else "English"
         
         # 프롬프트 구성
+        LoggingUtil.info("BoundedContextWorkflow", "📝 프롬프트 구성 시작...")
         prompt_dict = self._build_prompt(
             devision_aspect,
             requirements,
@@ -121,6 +122,8 @@ class BoundedContextWorkflow:
             previous_aspect_model,
             language
         )
+        
+        LoggingUtil.info("BoundedContextWorkflow", "📝 프롬프트 구성 완료")
         
         try:
             from langchain_core.messages import SystemMessage, HumanMessage
@@ -132,6 +135,12 @@ class BoundedContextWorkflow:
             for user_msg in prompt_dict["user"]:
                 messages.append(HumanMessage(content=user_msg))
             
+            # 프롬프트 로깅 (디버깅용)
+            LoggingUtil.info("BoundedContextWorkflow", f"📝 System Prompt 길이: {len(prompt_dict['system'])}")
+            LoggingUtil.info("BoundedContextWorkflow", f"📝 User Prompt 개수: {len(prompt_dict['user'])}")
+            for i, user_msg in enumerate(prompt_dict["user"]):
+                LoggingUtil.info("BoundedContextWorkflow", f"📝 User Prompt {i+1} 길이: {len(user_msg)}")
+            
             response_chunks = []
             
             # 스트리밍으로 LLM 응답 수신
@@ -141,10 +150,17 @@ class BoundedContextWorkflow:
             
             response = "".join(response_chunks)
             
+            # LLM 응답 로깅 (디버깅용)
+            LoggingUtil.info("BoundedContextWorkflow", f"📝 LLM 응답 길이: {len(response)}")
+            LoggingUtil.info("BoundedContextWorkflow", f"📝 LLM 응답 처음 500자: {response[:500]}")
+            
             response_clean = self._extract_json(response)
             result_data = json.loads(response_clean)
             
             LoggingUtil.info("BoundedContextWorkflow", f"✅ BC LLM 응답 완료: {len(result_data.get('boundedContexts', []))}개 BC")
+            LoggingUtil.info("BoundedContextWorkflow", f"📝 thoughts 길이: {len(result_data.get('thoughts', ''))}")
+            LoggingUtil.info("BoundedContextWorkflow", f"📝 relations 개수: {len(result_data.get('relations', []))}")
+            LoggingUtil.info("BoundedContextWorkflow", f"📝 explanations 개수: {len(result_data.get('explanations', []))}")
             
             return {
                 "thoughts": result_data.get("thoughts", ""),
@@ -168,16 +184,22 @@ class BoundedContextWorkflow:
 
     def _build_prompt(self, devision_aspect, requirements, generate_option, feedback, previous_aspect_model, language):
         """프롬프트 구성 (기존 DevideBoundedContextGenerator.js와 동일)"""
+        LoggingUtil.info("BoundedContextWorkflow", f"📝 _build_prompt 시작: aspect={devision_aspect}, language={language}")
+        
         # Maximum BC count
         max_bcs = generate_option.get('numberOfBCs', 5)
+        LoggingUtil.info("BoundedContextWorkflow", f"📝 max_bcs: {max_bcs}")
         
         # Task Guidelines (이미 <instruction> 태그 포함)
+        LoggingUtil.info("BoundedContextWorkflow", "📝 Task Guidelines 구성 중...")
         task_guidelines = self._build_task_guidelines(language, max_bcs)
+        LoggingUtil.info("BoundedContextWorkflow", f"📝 Task Guidelines 완료: {len(task_guidelines)}자")
         
         # End comment (기존 생성기와 동일)
         end_comment = "\n\n<request>This is the entire guideline. When you're ready, please output 'Approved.' Then I will begin user input.</request>"
         
         # User Input (JSON 형식으로 변환)
+        LoggingUtil.info("BoundedContextWorkflow", "📝 User Input 구성 중...")
         user_input_dict = self._build_user_input_dict(
             devision_aspect,
             requirements,
@@ -185,8 +207,10 @@ class BoundedContextWorkflow:
             feedback,
             previous_aspect_model
         )
+        LoggingUtil.info("BoundedContextWorkflow", f"📝 User Input 완료: {len(str(user_input_dict))}자")
         
         # Persona 정보 (System Prompt)
+        LoggingUtil.info("BoundedContextWorkflow", "📝 Persona 정보 구성 중...")
         persona_info = """<persona_and_role>
 <persona>Expert Domain-Driven Design (DDD) Architect</persona>
 <goal>To analyze functional requirements and divide them into appropriate Bounded Contexts following Domain-Driven Design principles, ensuring high cohesion and low coupling.</goal>
@@ -216,14 +240,13 @@ class BoundedContextWorkflow:
 
     def finalize(self, state: BoundedContextState) -> Dict:
         """
-        최종 결과 정리
+        최종 결과 정리 (기존 DevideBoundedContextGenerator.js의 _processAIOutput과 동일)
         """
         LoggingUtil.info("BoundedContextWorkflow", "✨ BC 워크플로우 최종 정리")
         
-        # Frontend의 _processAIOutput 및 _convertRefsToIndexes 로직을 여기에 구현
-        # 현재는 단순히 상태 반환
-
-        return {
+        # Frontend의 _processAIOutput 로직 구현
+        result = {
+            "devisionAspect": state.get("devisionAspect", ""),
             "thoughts": state.get("thoughts", ""),
             "boundedContexts": state.get("boundedContexts", []),
             "relations": state.get("relations", []),
@@ -232,12 +255,22 @@ class BoundedContextWorkflow:
             "isCompleted": True,
             "logs": state["logs"] + [{"timestamp": datetime.now().isoformat(), "message": "BC 워크플로우 완료"}]
         }
+        
+        # events와 requirements를 빈 배열로 초기화 (기존 생성기와 동일)
+        for bc in result.get("boundedContexts", []):
+            if not bc.get("events"):
+                bc["events"] = []
+            if not bc.get("requirements"):
+                bc["requirements"] = []
+        
+        return result
 
     def finalize_result(self, state: BoundedContextState) -> Dict:
         """
         최종 결과를 반환하기 전에 필요한 후처리
         """
         return {
+            "devisionAspect": state.get("devisionAspect", ""),
             "thoughts": state.get("thoughts", ""),
             "boundedContexts": state.get("boundedContexts", []),
             "relations": state.get("relations", []),
