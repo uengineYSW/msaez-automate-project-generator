@@ -193,6 +193,8 @@ Guidelines:
         """
         return {
             "summarizedRequirements": state.get("summarizedRequirements", []),
+            "originalRequirements": state.get("requirements", ""),
+            "refs": state.get("summarizedRequirements", []),  # Frontend 호환성
             "progress": state.get("progress", 0),
             "logs": state.get("logs", []),
             "isCompleted": state.get("isCompleted", False),
