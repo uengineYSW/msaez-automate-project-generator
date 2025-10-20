@@ -12,8 +12,10 @@ from project_generator.run_healcheck_server import run_healcheck_server
 from project_generator.simple_autoscaler import start_autoscaler
 from project_generator.utils.logging_util import LoggingUtil
 
-# UserStory Workflow import
+# Workflow imports
 from project_generator.workflows.user_story.user_story_generator import UserStoryWorkflow
+from project_generator.workflows.summarizer.requirements_summarizer import RequirementsSummarizerWorkflow
+from project_generator.workflows.bounded_context.bounded_context_generator import BoundedContextWorkflow
 
 # 전역 job_manager 인스턴스
 _current_job_manager: DecentralizedJobManager = None
@@ -47,8 +49,8 @@ async def main():
             global _current_job_manager
             _current_job_manager = job_manager
             
-            # 감시할 namespace 목록 (UserStory Generator만)
-            monitored_namespaces = ['user_story_generator']
+            # 감시할 namespace 목록
+            monitored_namespaces = ['user_story_generator', 'summarizer', 'bounded_context']
             
             if Config.is_local_run():
                 tasks.append(asyncio.create_task(job_manager.start_job_monitoring(monitored_namespaces)))
@@ -104,6 +106,83 @@ async def main():
             continue
 
 
+async def process_summarizer_job(job_id: str, complete_job_func: callable):
+    """Summarizer Job 처리 함수"""
+    error_occurred = None
+    try:
+        LoggingUtil.info("main", f"🚀 Summarizer 처리 시작: {job_id}")
+        
+        # Job 데이터 로딩
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            job_path = f'jobs/summarizer/{job_id}'
+            job_data = await loop.run_in_executor(
+                executor,
+                lambda: FirebaseSystem.instance().get_data(job_path)
+            )
+        
+        if not job_data:
+            LoggingUtil.warning("main", f"Job 데이터 없음: {job_id}")
+            return
+        
+        inputs = job_data.get("state", {}).get("inputs", {})
+        if not inputs:
+            LoggingUtil.warning("main", f"Job inputs 없음: {job_id}")
+            return
+        
+        # SummarizerWorkflow 실행
+        workflow = RequirementsSummarizerWorkflow()
+        result = await asyncio.to_thread(workflow.run, inputs)
+        
+        summaries = result.get('summarizedRequirements', [])
+        LoggingUtil.info("main", f"✅ 요약 완료: {len(summaries)}개")
+        
+        # 결과를 Firebase에 저장
+        output_path = f'jobs/summarizer/{job_id}/state/outputs'
+        await asyncio.to_thread(
+            FirebaseSystem.instance().set_data,
+            output_path,
+            result
+        )
+        
+        # requestedJob 삭제
+        req_path = f'requestedJobs/summarizer/{job_id}'
+        await asyncio.to_thread(
+            FirebaseSystem.instance().delete_data,
+            req_path
+        )
+        
+        LoggingUtil.info("main", f"🎉 완료: {job_id}")
+        
+    except Exception as e:
+        error_occurred = e
+        LoggingUtil.exception("main", f"Summarizer Job 처리 오류: {job_id}", e)
+        
+        # 실패 상태 저장
+        try:
+            error_output = {
+                "summarizedRequirements": [],
+                "isCompleted": False,
+                "error": str(e),
+                "logs": [{
+                    "timestamp": datetime.now().isoformat(),
+                    "message": f"오류: {str(e)}"
+                }]
+            }
+            
+            output_path = f'jobs/summarizer/{job_id}/state/outputs'
+            await asyncio.to_thread(
+                FirebaseSystem.instance().set_data,
+                output_path,
+                error_output
+            )
+        except Exception as save_error:
+            LoggingUtil.exception("main", f"실패 저장 오류: {job_id}", save_error)
+    
+    finally:
+        # 예외 발생 여부와 관계없이 complete_job_func 호출
+        complete_job_func()
+
 async def process_user_story_job(job_id: str, complete_job_func: callable):
     """UserStory Job 처리 함수"""
     try:
@@ -153,7 +232,6 @@ async def process_user_story_job(job_id: str, complete_job_func: callable):
         )
         
         LoggingUtil.info("main", f"🎉 완료: {job_id}")
-        complete_job_func()
         
     except Exception as e:
         LoggingUtil.exception("main", f"처리 오류: {job_id}", e)
@@ -171,9 +249,86 @@ async def process_user_story_job(job_id: str, complete_job_func: callable):
             FirebaseSystem.instance().set_data(output_path, error_output)
         except Exception as save_error:
             LoggingUtil.exception("main", f"실패 저장 오류: {job_id}", save_error)
+    
+    finally:
+        # 예외 발생 여부와 관계없이 complete_job_func 호출
+        complete_job_func()
+
+async def process_bounded_context_job(job_id: str, complete_job_func: callable):
+    """Bounded Context 생성 Job 처리"""
+    
+    try:
+        # Job 데이터 로드
+        job_path = f'jobs/bounded_context/{job_id}'
+        job_data = await asyncio.to_thread(
+            FirebaseSystem.instance().get_data,
+            job_path
+        )
+        
+        if not job_data:
+            LoggingUtil.error("main", f"Job 데이터 없음: {job_id}")
+            return
+        
+        # 입력 데이터 추출 (state.inputs에서 가져옴)
+        state = job_data.get('state', {})
+        inputs_data = state.get('inputs', {})
+        
+        inputs = {
+            'devisionAspect': inputs_data.get('devisionAspect', ''),
+            'requirements': inputs_data.get('requirements', {}),
+            'generateOption': inputs_data.get('generateOption', {}),
+            'feedback': inputs_data.get('feedback'),
+            'previousAspectModel': inputs_data.get('previousAspectModel')
+        }
+        
+        # 워크플로우 실행
+        workflow = BoundedContextWorkflow()
+        result = await asyncio.to_thread(workflow.run, inputs)
+        
+        # 결과 저장
+        output_path = f'jobs/bounded_context/{job_id}/state/outputs'
+        await asyncio.to_thread(
+            FirebaseSystem.instance().set_data,
+            output_path,
+            result
+        )
+        
+        # requestedJob 삭제
+        req_path = f'requestedJobs/bounded_context/{job_id}'
+        await asyncio.to_thread(
+            FirebaseSystem.instance().delete_data,
+            req_path
+        )
+        
+        LoggingUtil.info("main", f"🎉 BC 생성 완료: {job_id}, BCs: {len(result.get('boundedContexts', []))}")
+        
+    except Exception as e:
+        error_occurred = e
+        LoggingUtil.exception("main", f"BC 생성 오류: {job_id}", e)
+        
+        # 실패 기록
+        try:
+            error_output = {
+                'isFailed': True,
+                'error': str(e),
+                'progress': 0,
+                'thoughts': '',
+                'boundedContexts': [],
+                'relations': [],
+                'explanations': [],
+                'logs': [{'timestamp': datetime.now().isoformat(), 'level': 'error', 'message': str(e)}]
+            }
+            output_path = f'jobs/bounded_context/{job_id}/state/outputs'
+            FirebaseSystem.instance().set_data(output_path, error_output)
+        except Exception as save_error:
+            LoggingUtil.exception("main", f"실패 저장 오류: {job_id}", save_error)
+    
+    finally:
+        # 예외 발생 여부와 관계없이 complete_job_func 호출
+        complete_job_func()
 
 async def process_job_async(job_id: str, complete_job_func: callable):
-    """비동기 UserStory Job 처리 함수"""
+    """비동기 Job 처리 함수 (Job ID prefix로 라우팅)"""
     
     try:
         LoggingUtil.debug("main", f"Job 시작: {job_id}")
@@ -181,9 +336,13 @@ async def process_job_async(job_id: str, complete_job_func: callable):
             LoggingUtil.warning("main", f"Job 처리 오류: {job_id}, 유효하지 않음")
             return
         
-        # UserStory Job만 처리
+        # Job 타입별 라우팅 (각 함수에서 finally 블록으로 complete_job_func 호출)
         if job_id.startswith("usgen-"):
             await process_user_story_job(job_id, complete_job_func)
+        elif job_id.startswith("summ-"):
+            await process_summarizer_job(job_id, complete_job_func)
+        elif job_id.startswith("bcgen-"):
+            await process_bounded_context_job(job_id, complete_job_func)
         else:
             LoggingUtil.warning("main", f"지원하지 않는 Job 타입: {job_id}")
             
