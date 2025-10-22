@@ -31,7 +31,9 @@ def generate_sitemap(state: SiteMapState) -> SiteMapState:
             temperature=0.3
         )
         
-        bounded_contexts_json = json.dumps(state["bounded_contexts"], ensure_ascii=False, indent=2)
+        # 'ui' BC 제외
+        filtered_bcs = [bc for bc in state["bounded_contexts"] if bc.get("name") != "ui"]
+        bounded_contexts_json = json.dumps(filtered_bcs, ensure_ascii=False, indent=2)
         command_readmodel_json = json.dumps(state["command_readmodel_data"], ensure_ascii=False, indent=2)
         
         # 기존 Navigation이 있는 경우 프롬프트 추가
