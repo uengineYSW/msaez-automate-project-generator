@@ -3,7 +3,9 @@ from langchain_core.messages import HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from src.project_generator.utils.logging_util import LoggingUtil
+from src.project_generator.systems.firebase_system import FirebaseSystem
 import json
+import re
 
 class SiteMapState(TypedDict):
     """SiteMap 생성 워크플로우 상태"""
@@ -18,26 +20,124 @@ class SiteMapState(TypedDict):
     is_completed: bool
     is_failed: bool
     error: str
+    current_chunk: int
+    total_chunks: int
+    chunks: list
+
+def split_requirements_into_chunks(requirements: str, chunk_size: int = 12000) -> list:
+    """
+    요구사항을 청크로 분할 (문장 단위로 분할하여 문맥 유지)
+    """
+    sentences = re.split(r'(?<=[.!?\n])\s+', requirements)
+    
+    chunks = []
+    current_chunk = ""
+    
+    for sentence in sentences:
+        if len(current_chunk) + len(sentence) > chunk_size and current_chunk:
+            chunks.append(current_chunk.strip())
+            current_chunk = sentence
+        else:
+            current_chunk += " " + sentence if current_chunk else sentence
+    
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+    
+    return chunks if chunks else [requirements]
+
+def merge_sitemap_data(existing_sitemap: dict, new_sitemap: dict) -> dict:
+    """
+    기존 사이트맵과 새로운 사이트맵 데이터를 병합 (안전하게 path 처리)
+    """
+    if not existing_sitemap or not existing_sitemap.get("pages"):
+        return new_sitemap
+    
+    # 기존 페이지들을 path를 키로 하는 딕셔너리로 변환 (path가 없는 경우 id나 title 사용)
+    merged_pages = {}
+    for page in existing_sitemap.get("pages", []):
+        key = page.get("path") or page.get("id") or page.get("title", "unknown")
+        merged_pages[key] = page
+    
+    # 새로운 페이지 병합
+    for new_page in new_sitemap.get("pages", []):
+        # path가 없으면 id나 title로 대체
+        page_key = new_page.get("path") or new_page.get("id") or new_page.get("title", "unknown")
+        
+        if page_key in merged_pages:
+            # 기존 페이지에 children 추가 (중복 제거)
+            existing_page = merged_pages[page_key]
+            existing_children = existing_page.get("children", [])
+            new_children = new_page.get("children", [])
+            
+            # children의 키 결정 (path, id, title 순서로)
+            existing_child_keys = {
+                child.get("path") or child.get("id") or child.get("title", "unknown") 
+                for child in existing_children
+            }
+            
+            unique_new_children = [
+                child for child in new_children 
+                if (child.get("path") or child.get("id") or child.get("title", "unknown")) not in existing_child_keys
+            ]
+            
+            existing_page["children"] = existing_children + unique_new_children
+        else:
+            # 새로운 페이지 추가
+            merged_pages[page_key] = new_page
+    
+    return {
+        "title": existing_sitemap.get("title") or new_sitemap.get("title", "새로운 웹사이트"),
+        "description": existing_sitemap.get("description") or new_sitemap.get("description", "웹사이트 설명"),
+        "pages": list(merged_pages.values())
+    }
 
 def generate_sitemap(state: SiteMapState) -> SiteMapState:
     """
-    Command/ReadModel 데이터를 기반으로 SiteMap 생성
+    Command/ReadModel 데이터를 기반으로 SiteMap 생성 (청크별 순차 처리)
     """
     try:
-        LoggingUtil.info(state["job_id"], "Starting SiteMap generation...")
+        # 첫 호출 시 청크 분할
+        if state.get("current_chunk", 0) == 0:
+            requirements = state["requirements"]
+            
+            # 요구사항 길이 체크 및 청크 분할 결정
+            if len(requirements) > 12000:
+                chunks = split_requirements_into_chunks(requirements, chunk_size=12000)
+                LoggingUtil.info(state["job_id"], f"Requirements split into {len(chunks)} chunks")
+                state["chunks"] = chunks
+                state["total_chunks"] = len(chunks)
+                state["current_chunk"] = 0
+                state["site_map"] = {"pages": []}
+            else:
+                # 단일 청크로 처리
+                state["chunks"] = [requirements]
+                state["total_chunks"] = 1
+                state["current_chunk"] = 0
+                state["site_map"] = {"pages": []}
+        
+        current_chunk_index = state["current_chunk"]
+        total_chunks = state["total_chunks"]
+        chunk_text = state["chunks"][current_chunk_index]
+        
+        LoggingUtil.info(state["job_id"], f"Processing chunk {current_chunk_index + 1}/{total_chunks}...")
         
         llm = ChatOpenAI(
             model="gpt-4o",
             temperature=0.3
         )
         
-        bounded_contexts_json = json.dumps(state["bounded_contexts"], ensure_ascii=False, indent=2)
+        # 'ui' BC 필터링
+        filtered_bcs = [bc for bc in state["bounded_contexts"] if bc.get("name") != "ui"]
+        bounded_contexts_json = json.dumps(filtered_bcs, ensure_ascii=False, indent=2)
         command_readmodel_json = json.dumps(state["command_readmodel_data"], ensure_ascii=False, indent=2)
+        
+        # 기존 사이트맵 데이터를 existing_navigation으로 변환
+        existing_navigation = state.get("site_map", {}).get("pages", [])
         
         # 기존 Navigation이 있는 경우 프롬프트 추가
         existing_navigation_prompt = ""
-        if state.get("existing_navigation") and len(state["existing_navigation"]) > 0:
-            existing_titles = extract_existing_titles(state["existing_navigation"])
+        if existing_navigation and len(existing_navigation) > 0:
+            existing_titles = extract_existing_titles(existing_navigation)
             existing_navigation_prompt = f"""
 ALREADY GENERATED PAGES (DO NOT DUPLICATE):
 {', '.join(existing_titles)}
@@ -51,8 +151,10 @@ IMPORTANT:
         
         prompt = f"""You are an expert UX designer and web architect. Generate a comprehensive website sitemap JSON structure based on user requirements.
 
-REQUIREMENTS:
-{state["requirements"]}
+{existing_navigation_prompt}
+
+CURRENT REQUIREMENTS CHUNK ({current_chunk_index + 1}/{total_chunks}):
+{chunk_text}
 
 {existing_navigation_prompt}
 
@@ -146,16 +248,50 @@ RULES:
             parsed_json = json.loads(response_text)
             
             # siteMap 필드 추출 (LLM이 { "siteMap": {...} } 형식으로 반환)
-            site_map_data = parsed_json.get('siteMap', {})
+            new_site_map_data = parsed_json.get('siteMap', {})
             
-            LoggingUtil.info(state["job_id"], "SiteMap generation completed successfully")
+            # 기존 데이터와 병합
+            merged_sitemap = merge_sitemap_data(state["site_map"], new_site_map_data)
             
-            return {
-                **state,
-                "site_map": site_map_data,
-                "logs": [f"SiteMap generation completed"],
-                "progress": 50
-            }
+            LoggingUtil.info(state["job_id"], f"Chunk {current_chunk_index + 1}/{total_chunks} processed: {len(new_site_map_data.get('pages', []))} pages")
+            
+            # 다음 청크 처리 여부 결정
+            next_chunk = current_chunk_index + 1
+            progress = int((next_chunk / total_chunks) * 80)  # 80%까지는 생성 단계
+            
+            # Firebase에 중간 결과 업데이트 (UI에 실시간 반영)
+            try:
+                firebase = FirebaseSystem.instance()
+                job_path = f"jobs/sitemap_generator/{state['job_id']}"
+                
+                # 중간 결과를 Firebase에 업데이트 (outputs 경로에 저장)
+                output_path = f"{job_path}/state/outputs"
+                firebase.update_data(output_path, {
+                    "siteMap": merged_sitemap,
+                    "progress": progress,
+                    "logs": state["logs"] + [f"Chunk {current_chunk_index + 1}/{total_chunks} completed"]
+                })
+                LoggingUtil.info(state["job_id"], f"Firebase updated with chunk {current_chunk_index + 1}/{total_chunks} results")
+            except Exception as e:
+                LoggingUtil.info(state["job_id"], f"Failed to update Firebase: {str(e)}")
+            
+            if next_chunk < total_chunks:
+                # 다음 청크 처리
+                return {
+                    **state,
+                    "site_map": merged_sitemap,
+                    "current_chunk": next_chunk,
+                    "logs": [f"Chunk {next_chunk}/{total_chunks} generation in progress"],
+                    "progress": progress
+                }
+            else:
+                # 모든 청크 처리 완료
+                return {
+                    **state,
+                    "site_map": merged_sitemap,
+                    "logs": [f"All chunks processed. Total {len(merged_sitemap.get('pages', []))} pages"],
+                    "progress": 80
+                }
             
         except json.JSONDecodeError as e:
             error_msg = f"Failed to parse JSON response: {str(e)}"
@@ -218,9 +354,35 @@ def finalize_result(state: SiteMapState) -> SiteMapState:
             "logs": state["logs"] + [error_msg]
         }
 
+def should_continue_generation(state: SiteMapState) -> str:
+    """
+    청크 처리를 계속할지 결정
+    
+    IMPORTANT: current_chunk는 이미 처리된 청크의 인덱스
+    다음 청크가 존재하는지 확인하려면 current_chunk + 1 < total_chunks
+    """
+    if state.get("is_failed"):
+        return "finalize_result"
+    
+    # generate_sitemap 함수가 다음 청크 인덱스를 이미 설정했는지 확인
+    # 로그에서 "All chunks processed"가 있으면 완료된 것
+    logs = state.get("logs", [])
+    if logs and any("All chunks processed" in log for log in logs):
+        return "finalize_result"
+    
+    current_chunk = state.get("current_chunk", 0)
+    total_chunks = state.get("total_chunks", 1)
+    
+    # current_chunk는 다음에 처리할 청크의 인덱스
+    # 예: chunk 0 처리 후 current_chunk = 1 설정됨
+    if current_chunk < total_chunks:
+        return "generate_sitemap"
+    else:
+        return "finalize_result"
+
 def create_sitemap_workflow():
     """
-    SiteMap 생성 워크플로우 생성
+    SiteMap 생성 워크플로우 생성 (루프 지원)
     """
     workflow = StateGraph(SiteMapState)
     
@@ -230,7 +392,17 @@ def create_sitemap_workflow():
     
     # 엣지 추가
     workflow.set_entry_point("generate_sitemap")
-    workflow.add_edge("generate_sitemap", "finalize_result")
+    
+    # 조건부 엣지: 다음 청크가 있으면 generate로, 없으면 finalize로
+    workflow.add_conditional_edges(
+        "generate_sitemap",
+        should_continue_generation,
+        {
+            "generate_sitemap": "generate_sitemap",
+            "finalize_result": "finalize_result"
+        }
+    )
+    
     workflow.add_edge("finalize_result", END)
     
     return workflow.compile()

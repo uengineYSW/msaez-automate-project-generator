@@ -16,6 +16,7 @@ sys.path.insert(0, str(project_root))
 
 from src.project_generator.config import Config
 from src.project_generator.utils.logging_util import LoggingUtil
+from src.project_generator.utils.xml_util import XmlUtil
 
 
 class BoundedContextState(TypedDict):
@@ -503,12 +504,21 @@ class BoundedContextWorkflow:
 
     def _build_user_input_dict(self, devision_aspect, requirements, generate_option, feedback, previous_aspect_model) -> dict:
         """User Input 딕셔너리 구성 (기존 DevideBoundedContextGenerator.js의 __buildJsonUserQueryInputFormat과 동일)"""
+        
+        # Actors와 Events를 XML 형식으로 변환 (프론트엔드와 동일)
+        actors_data = requirements.get('analysisResult', {}).get('actors', [])
+        events_data = requirements.get('analysisResult', {}).get('events', [])
+        pbcs_data = requirements.get('pbcInfo', [])
+        
+        # Refs 제거 (프론트엔드의 RefsTraceUtil.removeRefsAttributes와 동일)
+        events_without_refs = self._remove_refs_from_events(events_data)
+        
         user_input = {
             "division_aspect": devision_aspect,
             "maximum_number_of_bounded_contexts": generate_option.get('numberOfBCs', 5),
-            "actors": requirements.get('analysisResult', {}).get('actors', []),
-            "events": requirements.get('analysisResult', {}).get('events', []),
-            "available_pre_built_components_pbcs": requirements.get('pbcInfo', []),
+            "actors": XmlUtil.from_dict(actors_data),
+            "events": XmlUtil.from_dict(events_without_refs),
+            "available_pre_built_components_pbcs": XmlUtil.from_dict(pbcs_data),
             "additional_rules": self._build_additional_rules(generate_option),
             "requirements": self._get_line_numbered_requirements(requirements)
         }
@@ -626,6 +636,22 @@ class BoundedContextWorkflow:
         
         return '\n'.join(rules)
 
+    def _remove_refs_from_events(self, events_data: List) -> List:
+        """Events 데이터에서 refs 속성 제거 (프론트엔드 RefsTraceUtil.removeRefsAttributes와 동일)"""
+        if not events_data:
+            return []
+        
+        def remove_refs_recursive(data):
+            if isinstance(data, dict):
+                # refs 키 제거
+                return {k: remove_refs_recursive(v) for k, v in data.items() if k != 'refs'}
+            elif isinstance(data, list):
+                return [remove_refs_recursive(item) for item in data]
+            else:
+                return data
+        
+        return remove_refs_recursive(events_data)
+    
     def _get_line_numbered_requirements(self, requirements) -> str:
         """라인 번호가 추가된 요구사항 텍스트 반환"""
         # summarizedResult가 있으면 사용, 없으면 userStory 사용

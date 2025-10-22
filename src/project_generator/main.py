@@ -362,9 +362,13 @@ async def process_command_readmodel_job(job_id: str, complete_job_func: callable
             'extracted_data': {}
         }
         
-        # 워크플로우 실행
+        # 워크플로우 실행 (recursion_limit 증가)
         workflow = create_command_readmodel_workflow()
-        result = await asyncio.to_thread(workflow.invoke, inputs)
+        result = await asyncio.to_thread(
+            workflow.invoke, 
+            inputs,
+            {"recursion_limit": 50}
+        )
         
         # 결과 저장
         output_path = f'jobs/command_readmodel_extractor/{job_id}/state/outputs'
@@ -448,7 +452,11 @@ async def process_sitemap_job(job_id: str, complete_job_func: callable):
         
         # 워크플로우 실행
         workflow = create_sitemap_workflow()
-        result = await asyncio.to_thread(workflow.invoke, inputs)
+        result = await asyncio.to_thread(
+            workflow.invoke, 
+            inputs,
+            {"recursion_limit": 50}
+        )
         
         # 결과 저장
         output_path = f'jobs/sitemap_generator/{job_id}/state/outputs'
