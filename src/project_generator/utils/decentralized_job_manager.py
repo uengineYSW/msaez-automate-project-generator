@@ -30,6 +30,10 @@ class DecentralizedJobManager:
             return "summarizer"
         elif job_id.startswith("bcgen-"):
             return "bounded_context"
+        elif job_id.startswith("cmrext-"):
+            return "command_readmodel_extractor"
+        elif job_id.startswith("smapgen-"):
+            return "sitemap_generator"
         else:
             return "project_generator"
     

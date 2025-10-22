@@ -80,6 +80,16 @@ class JobUtil:
             bcgen_pattern = re.compile(r'^bcgen-\d{13,}-[a-z0-9]+$')
             return bool(bcgen_pattern.match(job_id))
         
+        # Command/ReadModel Extractor Job ID 형식 체크 (cmrext-{timestamp}-{random})
+        if job_id.startswith('cmrext-'):
+            cmrext_pattern = re.compile(r'^cmrext-\d{13,}-[a-z0-9]+$')
+            return bool(cmrext_pattern.match(job_id))
+        
+        # SiteMap Generator Job ID 형식 체크 (smapgen-{timestamp}-{random})
+        if job_id.startswith('smapgen-'):
+            smapgen_pattern = re.compile(r'^smapgen-\d{13,}-[a-z0-9]+$')
+            return bool(smapgen_pattern.match(job_id))
+        
         # EventStorming UUID 형식 검증
         # 1. 기본 길이 검증 (정확히 36자: 32개 16진수 + 4개 하이픈)
         if len(job_id) != 36:

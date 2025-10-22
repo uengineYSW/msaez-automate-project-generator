@@ -16,6 +16,8 @@ from project_generator.utils.logging_util import LoggingUtil
 from project_generator.workflows.user_story.user_story_generator import UserStoryWorkflow
 from project_generator.workflows.summarizer.requirements_summarizer import RequirementsSummarizerWorkflow
 from project_generator.workflows.bounded_context.bounded_context_generator import BoundedContextWorkflow
+from project_generator.workflows.sitemap.command_readmodel_extractor import create_command_readmodel_workflow
+from project_generator.workflows.sitemap.sitemap_generator import create_sitemap_workflow
 
 # 전역 job_manager 인스턴스
 _current_job_manager: DecentralizedJobManager = None
@@ -50,7 +52,7 @@ async def main():
             _current_job_manager = job_manager
             
             # 감시할 namespace 목록
-            monitored_namespaces = ['user_story_generator', 'summarizer', 'bounded_context']
+            monitored_namespaces = ['user_story_generator', 'summarizer', 'bounded_context', 'command_readmodel_extractor', 'sitemap_generator']
             
             if Config.is_local_run():
                 tasks.append(asyncio.create_task(job_manager.start_job_monitoring(monitored_namespaces)))
@@ -327,6 +329,172 @@ async def process_bounded_context_job(job_id: str, complete_job_func: callable):
         # 예외 발생 여부와 관계없이 complete_job_func 호출
         complete_job_func()
 
+async def process_command_readmodel_job(job_id: str, complete_job_func: callable):
+    """Command/ReadModel 추출 Job 처리"""
+    
+    try:
+        LoggingUtil.info("main", f"🚀 Command/ReadModel 추출 시작: {job_id}")
+        
+        # Job 데이터 로드
+        job_path = f'jobs/command_readmodel_extractor/{job_id}'
+        job_data = await asyncio.to_thread(
+            FirebaseSystem.instance().get_data,
+            job_path
+        )
+        
+        if not job_data:
+            LoggingUtil.error("main", f"Job 데이터 없음: {job_id}")
+            return
+        
+        # 입력 데이터 추출
+        state = job_data.get('state', {})
+        inputs_data = state.get('inputs', {})
+        
+        inputs = {
+            'job_id': job_id,
+            'requirements': inputs_data.get('requirements', ''),
+            'bounded_contexts': inputs_data.get('boundedContexts', []),
+            'logs': [],
+            'progress': 0,
+            'is_completed': False,
+            'is_failed': False,
+            'error': '',
+            'extracted_data': {}
+        }
+        
+        # 워크플로우 실행
+        workflow = create_command_readmodel_workflow()
+        result = await asyncio.to_thread(workflow.invoke, inputs)
+        
+        # 결과 저장
+        output_path = f'jobs/command_readmodel_extractor/{job_id}/state/outputs'
+        await asyncio.to_thread(
+            FirebaseSystem.instance().set_data,
+            output_path,
+            {
+                'extractedData': result.get('extracted_data', {}),
+                'logs': result.get('logs', []),
+                'progress': result.get('progress', 0),
+                'isCompleted': result.get('is_completed', False),
+                'isFailed': result.get('is_failed', False),
+                'error': result.get('error', '')
+            }
+        )
+        
+        # requestedJob 삭제
+        req_path = f'requestedJobs/command_readmodel_extractor/{job_id}'
+        await asyncio.to_thread(
+            FirebaseSystem.instance().delete_data,
+            req_path
+        )
+        
+        LoggingUtil.info("main", f"🎉 Command/ReadModel 추출 완료: {job_id}")
+        
+    except Exception as e:
+        error_occurred = e
+        LoggingUtil.exception("main", f"Command/ReadModel 추출 오류: {job_id}", e)
+        
+        # 실패 기록
+        try:
+            error_output = {
+                'isFailed': True,
+                'error': str(e),
+                'progress': 0,
+                'extractedData': {},
+                'logs': [{'timestamp': datetime.now().isoformat(), 'level': 'error', 'message': str(e)}]
+            }
+            output_path = f'jobs/command_readmodel_extractor/{job_id}/state/outputs'
+            FirebaseSystem.instance().set_data(output_path, error_output)
+        except Exception as save_error:
+            LoggingUtil.exception("main", f"실패 저장 오류: {job_id}", save_error)
+    
+    finally:
+        complete_job_func()
+
+async def process_sitemap_job(job_id: str, complete_job_func: callable):
+    """SiteMap 생성 Job 처리"""
+    
+    try:
+        LoggingUtil.info("main", f"🚀 SiteMap 생성 시작: {job_id}")
+        
+        # Job 데이터 로드
+        job_path = f'jobs/sitemap_generator/{job_id}'
+        job_data = await asyncio.to_thread(
+            FirebaseSystem.instance().get_data,
+            job_path
+        )
+        
+        if not job_data:
+            LoggingUtil.error("main", f"Job 데이터 없음: {job_id}")
+            return
+        
+        # 입력 데이터 추출
+        state = job_data.get('state', {})
+        inputs_data = state.get('inputs', {})
+        
+        inputs = {
+            'job_id': job_id,
+            'requirements': inputs_data.get('requirements', ''),
+            'bounded_contexts': inputs_data.get('boundedContexts', []),
+            'command_readmodel_data': inputs_data.get('commandReadModelData', {}),
+            'existing_navigation': inputs_data.get('existingNavigation', []),
+            'logs': [],
+            'progress': 0,
+            'is_completed': False,
+            'is_failed': False,
+            'error': '',
+            'site_map': {}
+        }
+        
+        # 워크플로우 실행
+        workflow = create_sitemap_workflow()
+        result = await asyncio.to_thread(workflow.invoke, inputs)
+        
+        # 결과 저장
+        output_path = f'jobs/sitemap_generator/{job_id}/state/outputs'
+        await asyncio.to_thread(
+            FirebaseSystem.instance().set_data,
+            output_path,
+            {
+                'siteMap': result.get('site_map', {}),
+                'logs': result.get('logs', []),
+                'progress': result.get('progress', 0),
+                'isCompleted': result.get('is_completed', False),
+                'isFailed': result.get('is_failed', False),
+                'error': result.get('error', '')
+            }
+        )
+        
+        # requestedJob 삭제
+        req_path = f'requestedJobs/sitemap_generator/{job_id}'
+        await asyncio.to_thread(
+            FirebaseSystem.instance().delete_data,
+            req_path
+        )
+        
+        LoggingUtil.info("main", f"🎉 SiteMap 생성 완료: {job_id}")
+        
+    except Exception as e:
+        error_occurred = e
+        LoggingUtil.exception("main", f"SiteMap 생성 오류: {job_id}", e)
+        
+        # 실패 기록
+        try:
+            error_output = {
+                'isFailed': True,
+                'error': str(e),
+                'progress': 0,
+                'siteMap': {},
+                'logs': [{'timestamp': datetime.now().isoformat(), 'level': 'error', 'message': str(e)}]
+            }
+            output_path = f'jobs/sitemap_generator/{job_id}/state/outputs'
+            FirebaseSystem.instance().set_data(output_path, error_output)
+        except Exception as save_error:
+            LoggingUtil.exception("main", f"실패 저장 오류: {job_id}", save_error)
+    
+    finally:
+        complete_job_func()
+
 async def process_job_async(job_id: str, complete_job_func: callable):
     """비동기 Job 처리 함수 (Job ID prefix로 라우팅)"""
     
@@ -343,6 +511,10 @@ async def process_job_async(job_id: str, complete_job_func: callable):
             await process_summarizer_job(job_id, complete_job_func)
         elif job_id.startswith("bcgen-"):
             await process_bounded_context_job(job_id, complete_job_func)
+        elif job_id.startswith("cmrext-"):
+            await process_command_readmodel_job(job_id, complete_job_func)
+        elif job_id.startswith("smapgen-"):
+            await process_sitemap_job(job_id, complete_job_func)
         else:
             LoggingUtil.warning("main", f"지원하지 않는 Job 타입: {job_id}")
             

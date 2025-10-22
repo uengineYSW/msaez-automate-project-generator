@@ -16,6 +16,7 @@ sys.path.insert(0, str(project_root))
 
 from src.project_generator.workflows.common.rag_retriever import RAGRetriever
 from src.project_generator.config import Config
+from src.project_generator.utils.logging_util import LoggingUtil
 
 
 class UserStoryState(TypedDict):
@@ -32,6 +33,7 @@ class UserStoryState(TypedDict):
     actors: List[Dict]                  # Actors
     businessRules: List[Dict]           # Business Rules
     boundedContexts: List[Dict]         # Bounded Contexts
+    textResponse: str                   # 텍스트 모드 응답 (선택)
     
     # Metadata
     progress: int                       # 진행률 (0-100)
@@ -150,16 +152,56 @@ class UserStoryWorkflow:
         # 기존 데이터가 있는지 확인 (첫 번째 청크인지 판별)
         has_existing_data = bool(existing_data_prompt.strip())
         
+        # 가상 시나리오 모드 감지 (요구사항이 없을 때)
+        is_virtual_scenario = self._is_virtual_scenario(requirements)
+        
         # 요구사항 텍스트 포맷팅
         user_story_section = ""
-        if requirements and len(requirements) >= 100:
+        if is_virtual_scenario:
+            # 가상 시나리오 모드: requirements 자체가 프롬프트
+            user_story_section = requirements
+        elif requirements and len(requirements) >= 100:
             user_story_section = f"""
 The user story is: {requirements}
 
 Please generate user stories and scenarios based on the above content, staying within the scope and context provided.
 """
+        else:
+            # userStory가 100자 미만이면 빈 문자열 (기존 생성기와 동일)
+            user_story_section = ""
         
-        prompt = f"""Please analyze the following requirements and extract ONLY the actors, user stories, and business rules that are EXPLICITLY mentioned or directly implied.
+        # 가상 시나리오 모드 또는 userStory가 100자 미만일 때는 텍스트 형식 사용
+        is_text_mode = is_virtual_scenario or not user_story_section
+        
+        if is_text_mode:
+            prompt = f"""Please generate a comprehensive analysis for the service with the following requests:
+
+{existing_data_prompt}
+
+1. Actors:
+   - List all actors (users, external systems, etc.) that interact with the system
+   - Describe each actor's role and responsibilities
+   
+2. User Stories (in detailed usecase spec):
+   - Create detailed user stories for each actor
+   - Each story should include "As a", "I want to", "So that" format
+   - Include acceptance criteria for each story
+   
+3. Business Rules:
+   - Define core business rules and constraints
+   - Include validation rules and business logic
+   - Specify any regulatory or compliance requirements
+
+LANGUAGE REQUIREMENT:
+Please generate the response in {language} while ensuring that all code elements (e.g., variable names, function names) remain in English.
+
+The response must:
+- Ensure complete traceability between actors, stories
+- Avoid any missing connections between components
+- Provide a clear, well-structured text response
+"""
+        else:
+            prompt = f"""Please analyze the following requirements and extract ONLY the actors, user stories, and business rules that are EXPLICITLY mentioned or directly implied.
 
 {user_story_section}
 
@@ -226,7 +268,12 @@ The response must:
 - Be directly traceable to the provided requirements text
 - Avoid any fictional or hypothetical content
 - Return ONLY the JSON object, no additional text
-<language_guide>Please generate the response in {language} while ensuring that all code elements (e.g., variable names, function names) remain in English.</language_guide>. Please generate the json in valid json format and if there's a property its value is null, don't contain the property. also, Please return only the json without any natural language.
+
+LANGUAGE REQUIREMENT:
+Please generate the response in {language} while ensuring that all code elements (e.g., variable names, function names) remain in English.
+
+FORMAT REQUIREMENT:
+Please generate the json in valid json format and if there's a property its value is null, don't contain the property. Also, please return only the json without any natural language.
 """
         
         try:
@@ -242,6 +289,22 @@ The response must:
                     response_chunks.append(chunk.content)
             
             response = "".join(response_chunks)
+            
+            # 텍스트 모드일 때는 JSON 파싱 건너뛰기
+            if is_text_mode:
+                return {
+                    "userStories": [],
+                    "actors": [],
+                    "businessRules": [],
+                    "boundedContexts": [],
+                    "textResponse": response,  # 텍스트 응답 저장
+                    "progress": 70,
+                    "logs": [{
+                        "timestamp": datetime.now().isoformat(),
+                        "level": "info",
+                        "message": "Generated text response (no JSON parsing)"
+                    }]
+                }
             
             # JSON 파싱
             response_clean = self._extract_json(response)
@@ -291,9 +354,24 @@ The response must:
         """
         
         user_stories = state.get("userStories", [])
+        text_response = state.get("textResponse", None)
+        
+        # textResponse가 있으면 검증 건너뛰고 그대로 전달
+        if text_response:
+            return {
+                "textResponse": text_response,
+                "userStories": [],
+                "progress": 90,
+                "logs": [{
+                    "timestamp": datetime.now().isoformat(),
+                    "level": "info",
+                    "message": "Text mode response, skipping validation"
+                }]
+            }
         
         if not user_stories:
             return {
+                "userStories": [],  # 빈 배열이라도 필드를 반환해야 함
                 "progress": 90,
                 "logs": [{
                     "timestamp": datetime.now().isoformat(),
@@ -344,7 +422,7 @@ The response must:
         """
         
         # State의 모든 데이터를 유지하면서 완료 상태 추가 (camelCase)
-        return {
+        result = {
             "userStories": state.get("userStories", []),
             "actors": state.get("actors", []),
             "businessRules": state.get("businessRules", []),
@@ -359,6 +437,29 @@ The response must:
                 "message": f"User story generation completed successfully. Total: {len(state.get('userStories', []))} stories"
             }]
         }
+        
+        # textResponse가 있으면 추가
+        if state.get("textResponse"):
+            result["textResponse"] = state.get("textResponse")
+        
+        return result
+    
+    def _is_virtual_scenario(self, requirements: str) -> bool:
+        """
+        가상 시나리오 모드 감지
+        Frontend에서 생성한 가상 시나리오 프롬프트인지 확인
+        """
+        if not requirements:
+            return False
+        
+        # 가상 시나리오 프롬프트의 특징적인 시작 부분 확인
+        virtual_scenario_indicators = [
+            "Please generate a comprehensive analysis",
+            "Create pain points and possible solutions",
+            "Persona definition and he(or her)'s painpoints"
+        ]
+        
+        return any(indicator in requirements for indicator in virtual_scenario_indicators)
     
     def _format_existing_data(self, existing_actors, existing_user_stories, 
                               existing_business_rules, existing_bounded_contexts) -> str:
