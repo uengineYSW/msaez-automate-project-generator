@@ -107,145 +107,378 @@ def extract_commands_and_readmodels(state: CommandReadModelState) -> CommandRead
         
         LoggingUtil.info(state["job_id"], f"Processing chunk {current_chunk_index + 1}/{total_chunks}...")
         
+        # 언어 감지 (한국어 여부 체크)
+        has_korean = any('\uac00' <= c <= '\ud7a3' for c in chunk_text[:500])
+        language = "Korean" if has_korean else "English"
+        
+        # Structured Output Schema (Frontend의 Zod schema와 동일)
+        response_schema = {
+            "type": "object",
+            "title": "CommandReadModelExtraction",
+            "description": "Extracted commands and read models organized by bounded contexts",
+            "properties": {
+                "extractedData": {
+                    "type": "object",
+                    "properties": {
+                        "boundedContexts": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "commands": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "name": {"type": "string"},
+                                                "actor": {"type": "string", "enum": ["user", "admin", "system", "external"]},
+                                                "aggregate": {"type": "string"},
+                                                "description": {"type": "string"}
+                                            },
+                                            "required": ["name", "actor", "aggregate", "description"],
+                                            "additionalProperties": False
+                                        }
+                                    },
+                                    "readModels": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "name": {"type": "string"},
+                                                "actor": {"type": "string", "enum": ["user", "admin", "system"]},
+                                                "aggregate": {"type": "string"},
+                                                "isMultipleResult": {"type": "boolean"},
+                                                "description": {"type": "string"}
+                                            },
+                                            "required": ["name", "actor", "aggregate", "isMultipleResult", "description"],
+                                            "additionalProperties": False
+                                        }
+                                    }
+                                },
+                                "required": ["name", "commands", "readModels"],
+                                "additionalProperties": False
+                            }
+                        }
+                    },
+                    "required": ["boundedContexts"],
+                    "additionalProperties": False
+                }
+            },
+            "required": ["extractedData"],
+            "additionalProperties": False
+        }
+        
         llm = ChatOpenAI(
-            model="gpt-4o",
-            temperature=0.3
+            model="gpt-4.1-2025-04-14",  # Frontend와 동일
+            temperature=0.2  # Frontend와 동일 (0.3 → 0.2)
         )
+        
+        # Structured Output 적용
+        llm_structured = llm.with_structured_output(response_schema, strict=True)
         
         bounded_contexts_json = json.dumps(state["bounded_contexts"], ensure_ascii=False, indent=2)
         
-        # 기존 추출 데이터가 있으면 프롬프트에 추가
+        # 기존 추출 데이터가 있으면 프롬프트에 추가 (Frontend와 동일한 요약 방식)
         existing_data_prompt = ""
         if state["extracted_data"].get("boundedContexts"):
+            # Frontend의 _createAccumulatedSummary와 동일하게 이름만 추출
+            accumulated_summary = []
+            for bc in state["extracted_data"].get("boundedContexts", []):
+                bc_name = bc.get("name", "")
+                accumulated_summary.append(f"## Bounded Context: {bc_name}")
+                
+                # Commands 이름만
+                commands = bc.get("commands", [])
+                if commands:
+                    command_names = [cmd.get("name", "") for cmd in commands if cmd.get("name")]
+                    accumulated_summary.append(f"Commands: {', '.join(command_names)}")
+                
+                # ReadModels 이름만
+                readmodels = bc.get("readModels", [])
+                if readmodels:
+                    readmodel_names = [rm.get("name", "") for rm in readmodels if rm.get("name")]
+                    accumulated_summary.append(f"ReadModels: {', '.join(readmodel_names)}")
+                
+                accumulated_summary.append("")  # 빈 줄
+            
+            accumulated_summary_text = "\n".join(accumulated_summary)
+            
+            # Frontend의 RecursiveCommandReadModelExtractor와 동일한 구조
             existing_data_prompt = f"""
-IMPORTANT - ALREADY EXTRACTED DATA:
-The following Commands and ReadModels have already been extracted from previous chunks.
-DO NOT duplicate them. Only extract NEW operations from the current chunk.
-
-Already Extracted:
-{json.dumps(state["extracted_data"], ensure_ascii=False, indent=2)}
+<recursive_extraction_context>
+    <previous_extracted_data_summary>
+        <title>Previously Accumulated Results - DO NOT RETURN THESE AGAIN</title>
+        <warning>⚠️ The items listed below have ALREADY been extracted and processed. DO NOT include them in your output.</warning>
+        <description>The following Commands and ReadModels were already extracted from previous requirement chunks and must be EXCLUDED from your current extraction:</description>
+        <exclusion_list>
+{accumulated_summary_text}
+        </exclusion_list>
+        <reminder>Extract ONLY new operations from the current chunk that are NOT listed above</reminder>
+    </previous_extracted_data_summary>
+    
+    <task_objectives>
+        <objective id="1">Extract ONLY NEW Commands and ReadModels from the current chunk that are NOT already in previous results</objective>
+        <objective id="2">DO NOT return any Commands or ReadModels that already exist in the previously accumulated results</objective>
+        <objective id="3">Maintain Bounded Context categorization consistency with previous extractions</objective>
+        <objective id="4">The system will handle merging automatically - you only provide new items</objective>
+    </task_objectives>
+    
+    <duplicate_avoidance_rules>
+        <rule id="1">Skip if Command/ReadModel name already exists (case-sensitive comparison)</rule>
+        <rule id="2">Skip if the same name exists within the same Bounded Context</rule>
+        <rule id="3">Skip if functionally equivalent operation already exists, even with slightly different naming</rule>
+        <rule id="4">If no new operations are found in the current chunk, return empty commands and readModels arrays</rule>
+    </duplicate_avoidance_rules>
+</recursive_extraction_context>
 """
         
-        prompt = f"""You are an expert DDD architect. Extract Commands and ReadModels (Views) from user requirements and organize them by Bounded Context.
+        # 프론트엔드와 동일한 상세한 XML 기반 프롬프트
+        task_guidelines = """<instruction>
+    <core_instructions>
+        <title>Command and ReadModel Extraction Task</title>
+        <task_description>Analyze business requirements and extract all business operations, categorizing them into Commands (state-changing operations) and ReadModels (query operations), organized by their corresponding Bounded Contexts.</task_description>
+        
+        <input_description>
+            <title>You will be given:</title>
+            <item id="1">**Requirements:** Business requirements describing the system functionality</item>
+            <item id="2">**Bounded Contexts:** List of identified bounded contexts with their aggregates</item>
+        </input_description>
+
+        <guidelines>
+            <title>Extraction Guidelines</title>
+            
+            <section id="command_extraction">
+                <title>Command Extraction Rules</title>
+                <description>Commands represent state-changing operations that modify the system's data or state.</description>
+                
+                <rule id="1">
+                    <name>State-Changing Operations</name>
+                    <description>Extract all operations that modify system state or data</description>
+                    <examples>
+                        <category name="Create">CreateReservation, RegisterUser, CreateFlight</category>
+                        <category name="Update">UpdateProfile, UpdateReservation, UpdateFlight</category>
+                        <category name="Delete">CancelReservation, DeleteFlight, DeleteSeat</category>
+                        <category name="Process">ProcessPayment, ConfirmReservation, VerifyEmail</category>
+                    </examples>
+                </rule>
+                
+                <rule id="2">
+                    <name>Business Processes</name>
+                    <description>Operations that execute specific business rules or logic</description>
+                    <examples>
+                        <category name="Validate">ValidateReservation, AuthenticateUser</category>
+                        <category name="Calculate">CalculatePrice, ComputeRefund</category>
+                        <category name="Notify">SendNotification, IssueAuthToken</category>
+                    </examples>
+                </rule>
+                
+                <rule id="3">
+                    <name>External System Integration</name>
+                    <description>Operations involving interaction with external systems</description>
+                    <examples>
+                        <category name="Synchronize">SyncFlightInfo, SyncSeatInfo</category>
+                        <category name="Detect">DetectFraudulentReservation</category>
+                    </examples>
+                </rule>
+                
+                <rule id="4">
+                    <name>Naming Convention</name>
+                    <description>Use Verb + Noun pattern in PascalCase (e.g., CreateOrder, UpdateProfile)</description>
+                </rule>
+                
+                <rule id="5">
+                    <name>Actor Identification</name>
+                    <description>Assign appropriate actor: user, admin, system, or external</description>
+                </rule>
+            </section>
+
+            <section id="readmodel_extraction">
+                <title>ReadModel (View) Extraction Rules</title>
+                <description>ReadModels represent query operations that retrieve data without changing state.</description>
+                
+                <rule id="1">
+                    <name>Data Retrieval</name>
+                    <description>Operations to fetch data without modifying it</description>
+                    <examples>
+                        <category name="Single Retrieval">UserProfile, ReservationDetail, FlightDetail</category>
+                        <category name="List Retrieval">FlightList, ReservationHistory, InquiryList</category>
+                    </examples>
+                </rule>
+                
+                <rule id="2">
+                    <name>Search and Filtering</name>
+                    <description>Data retrieval based on specific conditions or criteria</description>
+                    <examples>
+                        <category name="Search">FlightSearch, SearchReservations</category>
+                        <category name="Filtering">FilteredFlightList, AvailableSeats</category>
+                    </examples>
+                </rule>
+                
+                <rule id="3">
+                    <name>Statistics and Reports</name>
+                    <description>Aggregated data or summary information</description>
+                    <examples>
+                        <category name="Statistics">ReservationStatistics, SalesReport</category>
+                        <category name="Status">SeatAvailability, FlightStatus</category>
+                    </examples>
+                </rule>
+                
+                <rule id="4">
+                    <name>UI Support Data</name>
+                    <description>Data required for screen composition and user interface</description>
+                    <examples>
+                        <category name="Option Lists">AirportList, SeatClassOptions</category>
+                        <category name="Configuration">UserPreferences, SystemSettings</category>
+                    </examples>
+                </rule>
+                
+                <rule id="5">
+                    <name>Naming Convention</name>
+                    <description>Use Noun + Purpose pattern in PascalCase (e.g., FlightList, UserProfile)</description>
+                </rule>
+                
+                <rule id="6">
+                    <name>Multiple Result Indicator</name>
+                    <description>Set isMultipleResult to true for list/collection results, false for single item results</description>
+                </rule>
+                
+                <rule id="7">
+                    <name>Actor Identification</name>
+                    <description>Assign appropriate actor: user, admin, or system</description>
+                </rule>
+            </section>
+
+            <section id="bounded_context_assignment">
+                <title>Bounded Context Assignment Strategy</title>
+                
+                <rule id="1">
+                    <name>Domain Alignment</name>
+                    <description>Assign commands and readModels to the most appropriate Bounded Context based on domain responsibility and business capability</description>
+                </rule>
+                
+                <rule id="2">
+                    <name>Aggregate Alignment</name>
+                    <description>Consider which aggregates within each Bounded Context are most relevant to the operation</description>
+                </rule>
+                
+                <rule id="3">
+                    <name>Business Logic Grouping</name>
+                    <description>Group related operations within the same Bounded Context to maintain cohesion</description>
+                </rule>
+                
+                <rule id="4">
+                    <name>Comprehensive Coverage</name>
+                    <description>Extract ALL business operations from requirements without omission</description>
+                </rule>
+            </section>
+
+            <section id="quality_standards">
+                <title>Quality Standards</title>
+                
+                <rule id="1">
+                    <name>Completeness</name>
+                    <description>Extract ALL business operations mentioned in requirements</description>
+                </rule>
+                
+                <rule id="2">
+                    <name>Domain-Specific Focus</name>
+                    <description>Focus on domain-specific operations, not generic CRUD unless explicitly required</description>
+                </rule>
+                
+                <rule id="3">
+                    <name>Clear Naming</name>
+                    <description>Use clear, descriptive names that reflect business intent and purpose</description>
+                </rule>
+                
+                <rule id="4">
+                    <name>Proper Categorization</name>
+                    <description>Ensure commands and readModels are correctly distinguished and categorized</description>
+                </rule>
+                
+                <rule id="5">
+                    <name>Meaningful Descriptions</name>
+                    <description>Provide clear, concise descriptions explaining the purpose and business value of each operation</description>
+                </rule>
+            </section>
+        </guidelines>
+    </core_instructions>
+    
+    <output_format>
+        <title>JSON Output Format</title>
+        <description>The output must be a JSON object structured as follows:</description>
+        <schema>
+{
+    "extractedData": {
+        "boundedContexts": [
+            {
+                "name": "(BoundedContextName)",
+                "commands": [
+                    {
+                        "name": "(CommandName in PascalCase, Verb+Noun)",
+                        "actor": "(user|admin|system|external)",
+                        "aggregate": "(AggregateName)",
+                        "description": "(Clear description of what this command does and its business purpose)"
+                    }
+                ],
+                "readModels": [
+                    {
+                        "name": "(ReadModelName in PascalCase, Noun+Purpose)",
+                        "actor": "(user|admin|system)",
+                        "aggregate": "(AggregateName)",
+                        "isMultipleResult": (true for lists/collections, false for single items),
+                        "description": "(Clear description of what data this readModel retrieves and its purpose)"
+                    }
+                ]
+            }
+        ]
+    }
+}
+        </schema>
+        <field_requirements>
+            <requirement id="1">All field names must match exactly as shown in the schema</requirement>
+            <requirement id="2">Command names must follow Verb+Noun pattern (e.g., CreateOrder, ProcessPayment)</requirement>
+            <requirement id="3">ReadModel names must follow Noun+Purpose pattern (e.g., OrderList, UserProfile)</requirement>
+            <requirement id="4">Actor values must be exactly one of: user, admin, system, external (for commands) or user, admin, system (for readModels)</requirement>
+            <requirement id="5">Aggregate names must match those defined in the bounded contexts</requirement>
+            <requirement id="6">Descriptions must be clear and explain business purpose</requirement>
+        </field_requirements>
+    </output_format>
+</instruction>"""
+        
+        prompt = f"""{task_guidelines}
+
+<user_input>
+<current_chunk>Chunk {current_chunk_index + 1} of {total_chunks}</current_chunk>
+
+<requirements>
+{chunk_text}
+</requirements>
+
+<bounded_contexts>
+{bounded_contexts_json}
+</bounded_contexts>
 
 {existing_data_prompt}
+</user_input>
 
-CURRENT REQUIREMENTS CHUNK ({current_chunk_index + 1}/{total_chunks}):
-{chunk_text}
+LANGUAGE REQUIREMENT:
+Please generate the response in {language}. All descriptions and text fields should be in {language}, while technical names (command names, aggregate names) should remain in English.
 
-BOUNDED CONTEXTS:
-{bounded_contexts_json}
-
-TASK:
-Extract all business operations (Commands) and query operations (ReadModels/Views) from the requirements and organize them by their corresponding Bounded Context.
-
-EXTRACTION GUIDELINES:
-
-## Command Extraction Rules (비즈니스 로직):
-1. **상태 변경 작업**: 시스템의 상태나 데이터를 변경하는 모든 작업
-   - 생성: CreateReservation, RegisterUser, CreateFlight
-   - 수정: UpdateProfile, UpdateReservation, UpdateFlight
-   - 삭제: CancelReservation, DeleteFlight, DeleteSeat
-   - 처리: ProcessPayment, ConfirmReservation, VerifyEmail
-2. **비즈니스 프로세스**: 특정 비즈니스 규칙을 수행하는 작업
-   - 검증: ValidateReservation, AuthenticateUser
-   - 계산: CalculatePrice, ComputeRefund
-   - 통지: SendNotification, IssueAuthToken
-3. **외부 시스템 연동**: 외부 시스템과의 상호작용
-   - 동기화: SyncFlightInfo, SyncSeatInfo
-   - 감지: DetectFraudulentReservation
-4. **명명 규칙**: 동사 + 명사 (Verb + Noun)
-5. **액터 식별**: user, admin, system, external
-
-## ReadModel (View) Extraction Rules (조회 작업):
-1. **데이터 조회**: 상태를 변경하지 않고 데이터를 가져오는 작업
-   - 단일 조회: UserProfile, ReservationDetail, FlightDetail
-   - 목록 조회: FlightList, ReservationHistory, InquiryList
-2. **검색 및 필터링**: 조건에 따른 데이터 검색
-   - 검색: FlightSearch, SearchReservations
-   - 필터링: FilteredFlightList, AvailableSeats
-3. **통계 및 보고서**: 집계 데이터나 요약 정보
-   - 통계: ReservationStatistics, SalesReport
-   - 현황: SeatAvailability, FlightStatus
-4. **UI 지원 데이터**: 화면 구성에 필요한 데이터
-   - 옵션 목록: AirportList, SeatClassOptions
-   - 설정 정보: UserPreferences, SystemSettings
-5. **명명 규칙**: 명사 + 목적 (Noun + Purpose)
-6. **액터 식별**: user, admin, system
-
-## Bounded Context Assignment:
-1. **Domain Alignment**: Assign commands/views to the most appropriate Bounded Context based on domain responsibility
-2. **Aggregate Alignment**: Consider which aggregates within each Bounded Context are most relevant
-3. **Business Logic**: Group related operations within the same Bounded Context
-
-OUTPUT FORMAT:
-{{
-  "extractedData": {{
-    "boundedContexts": [
-      {{
-        "name": "BoundedContextName",
-        "alias": "BoundedContextAlias",
-        "commands": [
-          {{
-            "name": "CommandName",
-            "alias": "CommandAlias",
-            "description": "Command description",
-            "actor": "user|admin|system",
-            "aggregate": "AggregateName",
-            "properties": [
-              {{
-                "name": "propertyName",
-                "type": "String|Long|Integer|Boolean|Date",
-                "description": "Property description"
-              }}
-            ]
-          }}
-        ],
-        "readModels": [
-          {{
-            "name": "ReadModelName",
-            "alias": "ReadModelAlias",
-            "description": "ReadModel description",
-            "actor": "user|admin|system",
-            "aggregate": "AggregateName",
-            "isMultipleResult": true|false,
-            "queryParameters": [
-              {{
-                "name": "parameterName",
-                "type": "String|Long|Integer|Boolean|Date",
-                "description": "Parameter description"
-              }}
-            ]
-          }}
-        ]
-      }}
-    ]
-  }}
-}}
-
-RULES:
-- Extract ALL business operations from requirements
-- Focus on domain-specific operations, not generic CRUD
-- Ensure commands and views are properly categorized
+CRITICAL INSTRUCTIONS:
+- Extract ALL business operations mentioned in requirements
+- Focus on domain-specific operations, not generic CRUD unless explicitly required
+- Ensure commands and readModels are correctly distinguished and categorized
 - Use clear, descriptive names that reflect business intent
 - Assign appropriate actors for each operation
-- Return ONLY JSON, no explanations"""
+- Return ONLY the JSON object, no additional text or explanations"""
 
-        response = llm.invoke(prompt)
-        response_text = response.content
-        
-        # JSON 파싱
+        # Structured Output 사용 (Frontend의 response_format과 동일)
         try:
-            # JSON 코드 블록 제거
-            if "```json" in response_text:
-                response_text = response_text.split("```json")[1].split("```")[0].strip()
-            elif "```" in response_text:
-                response_text = response_text.split("```")[1].split("```")[0].strip()
+            result_data = llm_structured.invoke(prompt)
             
-            parsed_json = json.loads(response_text)
-            
-            # extractedData 필드 추출 (LLM이 { "extractedData": {...} } 형식으로 반환)
-            new_extracted_data = parsed_json.get('extractedData', {})
+            # extractedData 필드 추출
+            new_extracted_data = result_data.get('extractedData', {})
             
             # 기존 데이터와 병합
             merged_data = merge_extracted_data(state["extracted_data"], new_extracted_data)
@@ -290,7 +523,7 @@ RULES:
                     "progress": 80
                 }
             
-        except json.JSONDecodeError as e:
+        except Exception as e:
             error_msg = f"Failed to parse JSON response: {str(e)}"
             LoggingUtil.info(state["job_id"], error_msg)
             return {

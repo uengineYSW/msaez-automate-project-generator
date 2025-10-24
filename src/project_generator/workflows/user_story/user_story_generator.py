@@ -174,7 +174,24 @@ Please generate user stories and scenarios based on the above content, staying w
         is_text_mode = is_virtual_scenario or not user_story_section
         
         if is_text_mode:
-            prompt = f"""Please generate a comprehensive analysis for the service with the following requests:
+            # 가상 시나리오 모드: Frontend에서 이미 완성된 프롬프트를 전달하므로 그대로 사용
+            if is_virtual_scenario:
+                # requirements 자체가 이미 완성된 프롬프트 (Personas, Business Model 포함)
+                prompt = f"""{requirements}
+
+{existing_data_prompt}
+
+LANGUAGE REQUIREMENT:
+Please generate the response in {language} while ensuring that all code elements (e.g., variable names, function names) remain in English.
+
+The response must:
+- Ensure complete traceability between actors, stories
+- Avoid any missing connections between components
+- Provide a clear, well-structured text response
+"""
+            else:
+                # 제목만 있는 경우: 기본 프롬프트 사용
+                prompt = f"""Please generate a comprehensive analysis for the service with the following requests:
 
 {existing_data_prompt}
 

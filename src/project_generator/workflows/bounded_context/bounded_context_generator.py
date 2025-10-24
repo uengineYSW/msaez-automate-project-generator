@@ -46,13 +46,145 @@ class BoundedContextWorkflow:
     Bounded Context 생성 워크플로우
     """
     def __init__(self):
+        # Structured Output을 위한 JSON Schema 정의 (Frontend의 Zod schema와 동일)
+        self.response_schema = {
+            "type": "object",
+            "title": "BoundedContextResponse",
+            "description": "Bounded Context division result with thoughts, contexts, relations and explanations",
+            "properties": {
+                "thoughts": {"type": "string", "description": "Explanation of how BCs were derived"},
+                        "boundedContexts": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "alias": {"type": "string"},
+                                    "importance": {
+                                        "type": "string",
+                                        "enum": ["Core Domain", "Supporting Domain", "Generic Domain"]
+                                    },
+                                    "complexity": {"type": "number", "minimum": 0, "maximum": 1},
+                                    "differentiation": {"type": "number", "minimum": 0, "maximum": 1},
+                                    "implementationStrategy": {"type": "string"},
+                                    "aggregates": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "name": {"type": "string"},
+                                                "alias": {"type": "string"}
+                                            },
+                                            "required": ["name", "alias"],
+                                            "additionalProperties": False
+                                        }
+                                    },
+                                    "events": {"type": "array", "items": {"type": "string"}},
+                                    "requirements": {"type": "array", "items": {"type": "string"}},
+                                    "role": {"type": "string"},
+                                    "roleRefs": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "array",
+                                                "items": {"type": ["number", "string"]}
+                                            }
+                                        }
+                                    }
+                                },
+                                "required": ["name", "alias", "importance", "complexity", "differentiation", 
+                                           "implementationStrategy", "aggregates", "events", "requirements", 
+                                           "role", "roleRefs"],
+                                "additionalProperties": False
+                            }
+                        },
+                        "relations": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "type": {"type": "string"},
+                                    "upStream": {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": {"type": "string"},
+                                            "alias": {"type": "string"}
+                                        },
+                                        "required": ["name", "alias"],
+                                        "additionalProperties": False
+                                    },
+                                    "downStream": {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": {"type": "string"},
+                                            "alias": {"type": "string"}
+                                        },
+                                        "required": ["name", "alias"],
+                                        "additionalProperties": False
+                                    },
+                                    "refs": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "array",
+                                                "items": {"type": ["number", "string"]}
+                                            }
+                                        }
+                                    }
+                                },
+                                "required": ["name", "type", "upStream", "downStream", "refs"],
+                                "additionalProperties": False
+                            }
+                        },
+                        "explanations": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "sourceContext": {"type": "string"},
+                                    "targetContext": {"type": "string"},
+                                    "relationType": {"type": "string"},
+                                    "reason": {"type": "string"},
+                                    "interactionPattern": {"type": "string"},
+                                    "refs": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "array",
+                                                "items": {"type": ["number", "string"]}
+                                            }
+                                        }
+                                    }
+                                },
+                                "required": ["sourceContext", "targetContext", "relationType", 
+                                           "reason", "interactionPattern", "refs"],
+                                "additionalProperties": False
+                            }
+                        }
+                    },
+            "required": ["thoughts", "boundedContexts", "relations", "explanations"],
+            "additionalProperties": False
+        }
+        
+        # Frontend와 동일한 모델 사용
         self.llm = ChatOpenAI(
-            model=Config.DEFAULT_LLM_MODEL,
-            temperature=Config.DEFAULT_LLM_TEMPERATURE,
+            model="gpt-4.1-2025-04-14",  # Frontend와 동일
+            temperature=0.2,  # Frontend와 동일
             top_p=1.0,
             frequency_penalty=0.0,
             presence_penalty=0.0
         )
+        
+        # Structured Output을 지원하는 LLM (Frontend의 response_format과 동일)
+        self.llm_structured = self.llm.with_structured_output(
+            self.response_schema,
+            strict=True
+        )
+        
         self.workflow = self._build_workflow()
 
     def _build_workflow(self) -> StateGraph:
@@ -127,36 +259,40 @@ class BoundedContextWorkflow:
         LoggingUtil.info("BoundedContextWorkflow", "📝 프롬프트 구성 완료")
         
         try:
-            from langchain_core.messages import SystemMessage, HumanMessage
+            from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
             
-            # System Message
+            # Frontend와 동일한 Protocol Mode 구성
+            # 1. System Message (Persona)
             messages = [SystemMessage(content=prompt_dict["system"])]
             
-            # User Messages
-            for user_msg in prompt_dict["user"]:
-                messages.append(HumanMessage(content=user_msg))
+            # 2. User Message (Instruction + Request for Approval)
+            messages.append(HumanMessage(content=prompt_dict["user"][0]))
+            
+            # 3. Assistant Message (Approval) - Frontend와 동일!
+            messages.append(AIMessage(content="Approved."))
+            
+            # 4. User Message (Inputs + Language Guide)
+            messages.append(HumanMessage(content=prompt_dict["user"][1]))
             
             # 프롬프트 로깅 (디버깅용)
             LoggingUtil.info("BoundedContextWorkflow", f"📝 System Prompt 길이: {len(prompt_dict['system'])}")
-            LoggingUtil.info("BoundedContextWorkflow", f"📝 User Prompt 개수: {len(prompt_dict['user'])}")
-            for i, user_msg in enumerate(prompt_dict["user"]):
-                LoggingUtil.info("BoundedContextWorkflow", f"📝 User Prompt {i+1} 길이: {len(user_msg)}")
+            LoggingUtil.info("BoundedContextWorkflow", f"📝 User Prompt 1 (Instruction) 길이: {len(prompt_dict['user'][0])}")
+            LoggingUtil.info("BoundedContextWorkflow", f"📝 Assistant Prompt: Approved.")
+            LoggingUtil.info("BoundedContextWorkflow", f"📝 User Prompt 2 (Inputs) 길이: {len(prompt_dict['user'][1])}")
             
-            response_chunks = []
+            # 실제 프롬프트 내용 출력 (디버깅)
+            LoggingUtil.info("BoundedContextWorkflow", "=" * 80)
+            LoggingUtil.info("BoundedContextWorkflow", "📝 [DEBUG] User Prompt 2 (Inputs) 내용:")
+            LoggingUtil.info("BoundedContextWorkflow", prompt_dict['user'][1])
+            LoggingUtil.info("BoundedContextWorkflow", "=" * 80)
             
-            # 스트리밍으로 LLM 응답 수신
-            for chunk in self.llm.stream(messages):
-                if chunk.content:
-                    response_chunks.append(chunk.content)
-            
-            response = "".join(response_chunks)
+            # Structured Output 사용 (Frontend의 response_format과 동일)
+            # with_structured_output을 사용하면 자동으로 JSON Schema를 준수
+            result_data = self.llm_structured.invoke(messages)
             
             # LLM 응답 로깅 (디버깅용)
-            LoggingUtil.info("BoundedContextWorkflow", f"📝 LLM 응답 길이: {len(response)}")
-            LoggingUtil.info("BoundedContextWorkflow", f"📝 LLM 응답 처음 500자: {response[:500]}")
-            
-            response_clean = self._extract_json(response)
-            result_data = json.loads(response_clean)
+            LoggingUtil.info("BoundedContextWorkflow", f"📝 Structured Output 응답 완료")
+            LoggingUtil.info("BoundedContextWorkflow", f"📝 응답 타입: {type(result_data)}")
             
             LoggingUtil.info("BoundedContextWorkflow", f"✅ BC LLM 응답 완료: {len(result_data.get('boundedContexts', []))}개 BC")
             LoggingUtil.info("BoundedContextWorkflow", f"📝 thoughts 길이: {len(result_data.get('thoughts', ''))}")
@@ -219,24 +355,30 @@ class BoundedContextWorkflow:
 </persona_and_role>"""
 
         # Language Guide
-        language_guide = f"<language_guide>Please generate the response in {language} while ensuring that all code elements (e.g., variable names, function names) remain in English.</language_guide>"
+        language_guide = f"\n<language_guide>Please generate the response in {language} while ensuring that all code elements (e.g., variable names, function names) remain in English.</language_guide>"
 
-        # 프롬프트 구성 (기존 생성기와 동일)
+        # 프롬프트 구성 (Frontend와 동일)
         # 1. System Prompt (Persona)
         system_prompt = persona_info
         
         # 2. User Prompt (Task Guidelines + End Comment)
         user_prompt_1 = task_guidelines + end_comment
         
-        # 3. User Prompt (User Inputs)
-        user_prompt_2 = json.dumps(user_input_dict, ensure_ascii=False, indent=2)
+        # 3. User Prompt (User Inputs in XML format + Language Guide)
+        # Frontend처럼 inputs를 XML로 감싸고 language_guide를 함께 붙임
+        user_inputs_xml = self._build_user_input(
+            devision_aspect,
+            requirements,
+            generate_option,
+            feedback,
+            previous_aspect_model
+        )
         
-        # 4. User Prompt (Language Guide)
-        user_prompt_3 = language_guide
+        user_prompt_2 = user_inputs_xml + language_guide
         
         return {
             "system": system_prompt,
-            "user": [user_prompt_1, user_prompt_2, user_prompt_3]
+            "user": [user_prompt_1, user_prompt_2]
         }
 
     def finalize(self, state: BoundedContextState) -> Dict:
@@ -530,33 +672,53 @@ class BoundedContextWorkflow:
         return user_input
 
     def _build_user_input(self, devision_aspect, requirements, generate_option, feedback, previous_aspect_model) -> str:
-        """User Input 프롬프트 구성"""
-        user_input = f"""<user_input>
-    <division_aspect>{devision_aspect}</division_aspect>
-    <maximum_number_of_bounded_contexts>{generate_option.get('numberOfBCs', 5)}</maximum_number_of_bounded_contexts>
-    <actors>{json.dumps(requirements.get('analysisResult', {}).get('actors', []), ensure_ascii=False)}</actors>
-    <events>{json.dumps(requirements.get('analysisResult', {}).get('events', []), ensure_ascii=False)}</events>
-    <available_pre_built_components_pbcs>{json.dumps(requirements.get('pbcInfo', []), ensure_ascii=False)}</available_pre_built_components_pbcs>
-"""
+        """User Input 프롬프트 구성 (Frontend의 _inputsToString과 동일한 XML 구조)"""
         
-        # Additional rules
-        additional_rules = self._build_additional_rules(generate_option)
-        if additional_rules:
-            user_input += f"    <additional_rules>{additional_rules}</additional_rules>\n"
+        # Actors와 Events를 XML로 변환
+        actors_data = requirements.get('analysisResult', {}).get('actors', [])
+        events_data = requirements.get('analysisResult', {}).get('events', [])
+        pbcs_data = requirements.get('pbcInfo', [])
         
-        # Requirements
+        # Refs 제거 (프론트엔드의 RefsTraceUtil.removeRefsAttributes와 동일)
+        events_without_refs = self._remove_refs_from_events(events_data)
+        
+        # XML 변환 (Frontend의 XmlUtil.from_dict와 동일)
+        actors_xml = XmlUtil.from_dict(actors_data)
+        events_xml = XmlUtil.from_dict(events_without_refs)
+        pbcs_xml = XmlUtil.from_dict(pbcs_data)
+        
+        # Additional rules (XML 형식)
+        additional_rules_xml = self._build_additional_rules(generate_option)
+        
+        # Requirements (Line numbered)
         requirements_text = self._get_line_numbered_requirements(requirements)
-        user_input += f"    <requirements>{requirements_text}</requirements>\n"
+        
+        # Frontend의 _inputsToString과 동일한 구조로 조립
+        # 각 key를 XML 태그로 감싸되, value가 이미 XML이면 그대로 삽입
+        user_input = f"""<inputs>
+<division_aspect>{devision_aspect}</division_aspect>
+
+<maximum_number_of_bounded_contexts>{generate_option.get('numberOfBCs', 5)}</maximum_number_of_bounded_contexts>
+
+<actors>{actors_xml}</actors>
+
+<events>{events_xml}</events>
+
+<available_pre_built_components_pbcs>{pbcs_xml}</available_pre_built_components_pbcs>
+
+<additional_rules>{additional_rules_xml}</additional_rules>
+
+<requirements>{requirements_text}</requirements>
+"""
         
         # Feedback (if exists)
         if feedback:
-            user_input += f"    <feedback>{feedback}</feedback>\n"
+            feedback_prompt = self._feedback_prompt(feedback, previous_aspect_model)
+            user_input += f"\n<feedback>{feedback_prompt}</feedback>\n"
         
-        # Previous aspect model (if exists)
-        if previous_aspect_model:
-            user_input += f"    <previous_aspect_model>{json.dumps(previous_aspect_model, ensure_ascii=False)}</previous_aspect_model>\n"
+        # Frontend처럼 retiedCount 추가 (재시도 횟수)
+        user_input += "\n<retiedCount>0</retiedCount>\n</inputs>"
         
-        user_input += "</user_input>"
         return user_input
 
     def _feedback_prompt(self, feedback, previous_aspect_model) -> str:
