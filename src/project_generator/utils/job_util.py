@@ -90,6 +90,41 @@ class JobUtil:
             smapgen_pattern = re.compile(r'^smapgen-\d{13,}-[a-z0-9]+$')
             return bool(smapgen_pattern.match(job_id))
         
+        # Requirements Mapper Job ID 형식 체크 (reqmap-{timestamp}-{random})
+        if job_id.startswith('reqmap-'):
+            reqmap_pattern = re.compile(r'^reqmap-\d{13,}-[a-z0-9]+$')
+            return bool(reqmap_pattern.match(job_id))
+        
+        # Aggregate Draft Generator Job ID 형식 체크 (aggr-draft-{timestamp}-{random})
+        if job_id.startswith('aggr-draft-'):
+            aggr_draft_pattern = re.compile(r'^aggr-draft-\d{13,}-[a-z0-9]+$')
+            return bool(aggr_draft_pattern.match(job_id))
+        
+        # Preview Fields Generator Job ID 형식 체크 (preview-fields-{timestamp}-{random})
+        if job_id.startswith('preview-fields-'):
+            preview_fields_pattern = re.compile(r'^preview-fields-\d{13,}-[a-z0-9]+$')
+            return bool(preview_fields_pattern.match(job_id))
+        
+        # DDL Fields Generator Job ID 형식 체크 (ddl-fields-{timestamp}-{random})
+        if job_id.startswith('ddl-fields-'):
+            ddl_fields_pattern = re.compile(r'^ddl-fields-\d{13,}-[a-z0-9]+$')
+            return bool(ddl_fields_pattern.match(job_id))
+        
+        # Traceability Generator Job ID 형식 체크 (trace-add-{timestamp}-{random})
+        if job_id.startswith('trace-add-'):
+            trace_add_pattern = re.compile(r'^trace-add-\d{13,}-[a-z0-9]+$')
+            return bool(trace_add_pattern.match(job_id))
+        
+        # DDL Extractor Job ID 형식 체크 (ddl-extract-{timestamp}-{random})
+        if job_id.startswith('ddl-extract-'):
+            ddl_extract_pattern = re.compile(r'^ddl-extract-\d{13,}-[a-z0-9]+$')
+            return bool(ddl_extract_pattern.match(job_id))
+        
+        # Requirements Validator Job ID 형식 체크 (req-valid-{timestamp}-{random})
+        if job_id.startswith('req-valid-'):
+            req_valid_pattern = re.compile(r'^req-valid-\d{13,}-[a-z0-9]+$')
+            return bool(req_valid_pattern.match(job_id))
+        
         # EventStorming UUID 형식 검증
         # 1. 기본 길이 검증 (정확히 36자: 32개 16진수 + 4개 하이픈)
         if len(job_id) != 36:

@@ -57,13 +57,13 @@ class UserStoryWorkflow:
         self.rag_retriever = RAGRetriever()
         # ✅ Frontend와 완전히 동일한 설정 (model_kwargs 대신 직접 파라미터로)
         self.llm = ChatOpenAI(
-            model=Config.DEFAULT_LLM_MODEL,  # gpt-4.1-2025-04-14
-            temperature=Config.DEFAULT_LLM_TEMPERATURE,  # 0.2
+            model="gpt-4o-2024-08-06",
+            temperature=0.3,
             top_p=1.0,  # model_kwargs → 직접 파라미터 ✅
             frequency_penalty=0.0,  # model_kwargs → 직접 파라미터 ✅
             presence_penalty=0.0,  # model_kwargs → 직접 파라미터 ✅
             # max_tokens 설정 안 함 (Frontend도 없음)
-            verbose=True  # 🔍 디버깅: API 요청 로깅
+            verbose=False
         )
         self.workflow = self._build_workflow()
     
@@ -349,7 +349,7 @@ Please generate the json in valid json format and if there's a property its valu
             
         except Exception as e:
             error_msg = f"Failed to generate user stories: {str(e)}"
-            print(f"❌ {error_msg}")
+            LoggingUtil.error("UserStoryWorkflow", error_msg)
             
             return {
                 "userStories": [],
@@ -602,7 +602,7 @@ Please generate the json in valid json format and if there's a property its valu
             return result
         except Exception as e:
             error_msg = f"Workflow execution failed: {str(e)}"
-            print(f"❌ {error_msg}")
+            LoggingUtil.error("UserStoryWorkflow", error_msg)
             return {
                 "userStories": [],
                 "boundedContexts": [],

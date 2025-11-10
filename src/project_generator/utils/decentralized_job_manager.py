@@ -34,6 +34,20 @@ class DecentralizedJobManager:
             return "command_readmodel_extractor"
         elif job_id.startswith("smapgen-"):
             return "sitemap_generator"
+        elif job_id.startswith("reqmap-"):
+            return "requirements_mapper"
+        elif job_id.startswith("aggr-draft-"):
+            return "aggregate_draft_generator"
+        elif job_id.startswith("preview-fields-"):
+            return "preview_fields_generator"
+        elif job_id.startswith("ddl-fields-"):
+            return "ddl_fields_generator"
+        elif job_id.startswith("trace-add-"):
+            return "traceability_generator"
+        elif job_id.startswith("ddl-extract-"):
+            return "ddl_extractor"
+        elif job_id.startswith("req-valid-"):
+            return "requirements_validator"
         else:
             return "project_generator"
     

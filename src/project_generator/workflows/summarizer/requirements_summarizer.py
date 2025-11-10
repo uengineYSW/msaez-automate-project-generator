@@ -88,7 +88,7 @@ class RequirementsSummarizerWorkflow:
         requirements = state["requirements"]
         iteration = state["iteration"]
         
-        LoggingUtil.info("SummarizerWorkflow", f"📝 요구사항 요약 시작 (Iteration {iteration}, 길이: {len(requirements)} 자)")
+        LoggingUtil.info("SummarizerWorkflow", f"요약 시작 (Iteration {iteration})")
         
         # 요구사항 언어 감지 (간단한 휴리스틱)
         has_korean = any('\uac00' <= c <= '\ud7a3' for c in requirements[:500])
@@ -147,7 +147,7 @@ Guidelines:
             response_clean = self._extract_json(response)
             result_data = json.loads(response_clean)
             
-            LoggingUtil.info("SummarizerWorkflow", f"✅ 요약 완료: {len(result_data.get('summarizedRequirements', []))}개")
+            LoggingUtil.info("SummarizerWorkflow", f"요약 완료: {len(result_data.get('summarizedRequirements', []))}개")
             
             return {
                 "summarizedRequirements": result_data.get("summarizedRequirements", []),
@@ -167,7 +167,7 @@ Guidelines:
         """
         최종 결과 정리
         """
-        LoggingUtil.info("SummarizerWorkflow", "✨ 요약 워크플로우 최종 정리")
+        LoggingUtil.info("SummarizerWorkflow", "요약 워크플로우 최종 정리")
         
         final_summaries = []
         for summary in state.get("summarizedRequirements", []):
