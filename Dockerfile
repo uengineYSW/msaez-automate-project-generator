@@ -19,7 +19,7 @@ COPY src/ ./src/
 
 # uv 설치 및 의존성 설치
 RUN pip install uv
-RUN uv sync --frozen
+RUN uv sync
 
 # Python 경로 설정
 ENV PYTHONPATH=/app/src

@@ -52,6 +52,12 @@ spec:
               name: app-secrets
               key: LANGSMITH_API_KEY
         
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: OPENAI_API_KEY
+        
         - name: FIREBASE_SERVICE_ACCOUNT_PATH
           value: "./.auth/serviceAccountKey.json"
         - name: FIREBASE_DATABASE_URL
