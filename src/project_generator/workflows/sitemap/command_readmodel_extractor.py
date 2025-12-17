@@ -4,6 +4,8 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from src.project_generator.utils.logging_util import LoggingUtil
 from src.project_generator.systems.firebase_system import FirebaseSystem
+from src.project_generator.utils.refs_trace_util import RefsTraceUtil
+from src.project_generator.utils.trace_markdown_util import TraceMarkdownUtil
 import json
 import re
 
@@ -545,14 +547,41 @@ CRITICAL INSTRUCTIONS:
 
 def finalize_result(state: CommandReadModelState) -> CommandReadModelState:
     """
-    최종 결과 구성
+    최종 결과 구성 (프론트엔드와 동일하게 refs 변환 및 검증)
     """
     try:
         LoggingUtil.info(state["job_id"], "Finalizing Command/ReadModel extraction result...")
         
+        # 프론트엔드 CommandReadModelExtractor.onModelCreatedWithThinking와 동일한 처리
+        # 1. sanitizeAndConvertRefs: phrase → index 변환
+        # 2. validateRefs: 검증
+        
+        extracted_data = state.get("extracted_data", {})
+        requirements = state.get("requirements", "")
+        
+        if extracted_data and requirements:
+            # 라인 번호 추가 (프론트엔드 TextTraceUtil.addLineNumbers와 동일)
+            # XML 형식: <1>line1</1>\n<2>line2</2>...
+            lines = requirements.split('\n')
+            line_numbered_requirements = '\n'.join([f"<{i+1}>{line}</{i+1}>" for i, line in enumerate(lines)])
+            
+            # sanitizeAndConvertRefs 적용
+            extracted_data = RefsTraceUtil.sanitize_and_convert_refs(
+                extracted_data,
+                line_numbered_requirements,
+                is_use_xml_base=True
+            )
+            
+            # validateRefs 적용
+            try:
+                RefsTraceUtil.validate_refs(extracted_data, requirements)
+            except ValueError as e:
+                LoggingUtil.warning(state["job_id"], f"Refs validation warning: {str(e)}")
+                # 검증 실패해도 계속 진행 (프론트엔드와 동일)
+        
         return {
             **state,
-            "extracted_data": state["extracted_data"],
+            "extracted_data": extracted_data,
             "logs": state["logs"] + ["Finalization completed"],
             "progress": 100,
             "is_completed": True

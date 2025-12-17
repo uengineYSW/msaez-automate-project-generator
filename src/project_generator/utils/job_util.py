@@ -115,6 +115,11 @@ class JobUtil:
             trace_add_pattern = re.compile(r'^trace-add-\d{13,}-[a-z0-9]+$')
             return bool(trace_add_pattern.match(job_id))
         
+        # Standard Transformer Job ID 형식 체크 (std-trans-{timestamp}-{random})
+        if job_id.startswith('std-trans-'):
+            std_trans_pattern = re.compile(r'^std-trans-\d{13,}-[a-z0-9]+$')
+            return bool(std_trans_pattern.match(job_id))
+        
         # DDL Extractor Job ID 형식 체크 (ddl-extract-{timestamp}-{random})
         if job_id.startswith('ddl-extract-'):
             ddl_extract_pattern = re.compile(r'^ddl-extract-\d{13,}-[a-z0-9]+$')

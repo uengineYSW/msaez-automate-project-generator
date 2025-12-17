@@ -24,7 +24,7 @@ class RequirementsValidator:
 
     def __init__(self):
         self.llm = ChatOpenAI(
-            model="gpt-4o-2024-08-06",
+            model="gpt-4.1-2025-04-14",
             temperature=0.3,
             streaming=False,
             model_kwargs={

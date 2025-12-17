@@ -7,6 +7,7 @@ from typing import TypedDict, List, Dict, Any
 from datetime import datetime
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
+import copy
 
 from ...utils.logging_util import LoggingUtil
 
@@ -35,7 +36,7 @@ class DDLFieldsGenerator:
     Assigns DDL fields to aggregates using LangGraph workflow
     """
     
-    def __init__(self, model_name: str = "gpt-4o-2024-08-06"):
+    def __init__(self, model_name: str = "gpt-4.1-2025-04-14"):
         self.model_name = model_name
         self.llm = ChatOpenAI(
             model=model_name,
@@ -87,7 +88,21 @@ class DDLFieldsGenerator:
                                         "aggregateName": {"type": "string"},
                                         "ddl_fields": {
                                             "type": "array",
-                                            "items": {"type": "string"}
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "fieldName": {
+                                                        "type": "string",
+                                                        "description": "The field name (English name)"
+                                                    },
+                                                    "fieldAlias": {
+                                                        "type": "string",
+                                                        "description": "The field alias (Korean name)"
+                                                    }
+                                                },
+                                                "required": ["fieldName", "fieldAlias"],
+                                                "additionalProperties": False
+                                            }
                                         }
                                     },
                                     "required": ["aggregateName", "ddl_fields"],
@@ -131,20 +146,52 @@ class DDLFieldsGenerator:
             }
     
     def validate_assignments_node(self, state: DDLFieldsGeneratorState) -> DDLFieldsGeneratorState:
-        """Node: Validate field assignments"""
-        LoggingUtil.info("DDLFieldsGenerator", "Validating field assignments")
+        """Node: Validate field assignments and enrich with refs from allDdlFields"""
+        LoggingUtil.info("DDLFieldsGenerator", "Validating field assignments and enriching with refs")
         
         if state.get("error"):
             return state
         
         try:
-            input_fields = state["all_ddl_fields"]
+            # allDdlFields는 리스트일 수 있음 (문자열 또는 객체)
+            all_ddl_fields_input = state["all_ddl_fields"]
+            
+            # allDdlFields를 딕셔너리로 변환 (fieldName -> {fieldName, fieldAlias, refs} 매핑)
+            ddl_fields_refs_map = {}
+            input_fields = []  # 검증용 필드명 리스트
+            for field_item in all_ddl_fields_input:
+                if isinstance(field_item, dict):
+                    field_name = field_item.get("fieldName", "")
+                    refs = field_item.get("refs", [])
+                    field_alias = field_item.get("fieldAlias", "")
+                    if field_name:
+                        ddl_fields_refs_map[field_name] = {
+                            "fieldName": field_name,
+                            "fieldAlias": field_alias,
+                            "refs": refs if refs else []
+                        }
+                        input_fields.append(field_name)
+                elif isinstance(field_item, str):
+                    # 문자열인 경우 refs 없음
+                    ddl_fields_refs_map[field_item] = {
+                        "fieldName": field_item,
+                        "fieldAlias": "",
+                        "refs": []
+                    }
+                    input_fields.append(field_item)
+            
             assignments = state["result"].get("aggregateFieldAssignments", [])
             
-            # Collect all assigned fields
+            # Collect all assigned fields (extract fieldName from objects)
             assigned_fields = []
             for assignment in assignments:
-                assigned_fields.extend(assignment.get("ddl_fields", []))
+                ddl_fields = assignment.get("ddl_fields", [])
+                for field in ddl_fields:
+                    if isinstance(field, dict):
+                        assigned_fields.append(field.get("fieldName", ""))
+                    else:
+                        # Backward compatibility: if it's a string, use it directly
+                        assigned_fields.append(field)
             
             # Check for extra fields (not in input)
             extra_fields = [f for f in assigned_fields if f not in input_fields]
@@ -152,12 +199,50 @@ class DDLFieldsGenerator:
                 # remove extra fields (debug-only log removed)
                 # Remove extra fields from assignments
                 for assignment in assignments:
-                    assignment["ddl_fields"] = [f for f in assignment["ddl_fields"] if f in input_fields]
+                    ddl_fields = assignment.get("ddl_fields", [])
+                    assignment["ddl_fields"] = [
+                        f for f in ddl_fields 
+                        if (f.get("fieldName", "") if isinstance(f, dict) else f) in input_fields
+                    ]
             
-            # Re-collect assigned fields after removal
+            # Re-collect assigned fields after removal and enrich with refs
             final_assigned_fields = []
             for assignment in assignments:
-                final_assigned_fields.extend(assignment.get("ddl_fields", []))
+                ddl_fields = assignment.get("ddl_fields", [])
+                enriched_ddl_fields = []
+                for field in ddl_fields:
+                    if isinstance(field, dict):
+                        field_name = field.get("fieldName", "")
+                        final_assigned_fields.append(field_name)
+                        # 🔒 CRITICAL: allDdlFields에서 refs 가져와서 추가
+                        if field_name in ddl_fields_refs_map:
+                            enriched_field = copy.deepcopy(ddl_fields_refs_map[field_name])
+                            # fieldAlias는 LLM이 생성한 것을 우선 사용 (없으면 기본값)
+                            if field.get("fieldAlias"):
+                                enriched_field["fieldAlias"] = field.get("fieldAlias")
+                            enriched_ddl_fields.append(enriched_field)
+                        else:
+                            # refs가 없으면 빈 배열로 설정
+                            enriched_field = {
+                                "fieldName": field_name,
+                                "fieldAlias": field.get("fieldAlias", ""),
+                                "refs": []
+                            }
+                            enriched_ddl_fields.append(enriched_field)
+                    else:
+                        # 문자열인 경우 객체로 변환하고 refs 추가
+                        field_name = field
+                        final_assigned_fields.append(field_name)
+                        if field_name in ddl_fields_refs_map:
+                            enriched_ddl_fields.append(copy.deepcopy(ddl_fields_refs_map[field_name]))
+                        else:
+                            enriched_field = {
+                                "fieldName": field_name,
+                                "fieldAlias": "",
+                                "refs": []
+                            }
+                            enriched_ddl_fields.append(enriched_field)
+                assignment["ddl_fields"] = enriched_ddl_fields
             
             # Check for missing fields
             missing_fields = [f for f in input_fields if f not in final_assigned_fields]
@@ -170,7 +255,7 @@ class DDLFieldsGenerator:
                     "timestamp": datetime.now().isoformat()
                 }
             
-            LoggingUtil.info("DDLFieldsGenerator", f"Validation passed: {len(input_fields)} fields assigned")
+            LoggingUtil.info("DDLFieldsGenerator", f"Validation passed: {len(input_fields)} fields assigned with refs")
             
             return {
                 **state,
@@ -219,8 +304,13 @@ class DDLFieldsGenerator:
             for agg in state["aggregate_drafts"]
         ])
         
-        # Format DDL fields
-        fields_str = "\n".join([f"  - {field}" for field in state["all_ddl_fields"]])
+        # Format DDL fields (객체 배열이면 fieldName 추출, 문자열 배열이면 그대로 사용)
+        def get_field_name(field):
+            if isinstance(field, dict):
+                return field.get("fieldName", str(field))
+            return str(field)
+        
+        fields_str = "\n".join([f"  - {get_field_name(field)}" for field in state["all_ddl_fields"]])
         
         return f"""Role: Domain-Driven Design (DDD) Data Modeling Specialist
 
@@ -238,6 +328,7 @@ Operational Guidelines:
 * **Provide Clear Reasoning:** Document your decision-making process for each assignment to ensure transparency and maintainability.
 
 Your task is to analyze a bounded context's DDL fields and assign each field to the most appropriate aggregate draft.
+For each field in `ddl_fields`, include both `fieldName` (English name) and `fieldAlias` (Korean name/alias).
 
 Assignment Rules:
 1. **Complete Coverage:** Every field in the "All DDL Fields" list must be assigned to exactly one aggregate.
@@ -288,8 +379,14 @@ Inference Guidelines:
             {{
                 "aggregateName": "<name_of_aggregate>",
                 "ddl_fields": [
-                    "<field_name_1>",
-                    "<field_name_2>"
+                    {{
+                        "fieldName": "<field_name_1>",
+                        "fieldAlias": "<field_alias_1>"
+                    }},
+                    {{
+                        "fieldName": "<field_name_2>",
+                        "fieldAlias": "<field_alias_2>"
+                    }}
                 ]
             }}
         ]
@@ -310,11 +407,26 @@ Output:
         "aggregateFieldAssignments": [
             {{
                 "aggregateName": "Course",
-                "ddl_fields": ["course_id", "title", "description", "instructor_id", "status", "price_amount", "price_currency", "created_at", "updated_at"]
+                "ddl_fields": [
+                    {{"fieldName": "course_id", "fieldAlias": "강의ID"}},
+                    {{"fieldName": "title", "fieldAlias": "제목"}},
+                    {{"fieldName": "description", "fieldAlias": "설명"}},
+                    {{"fieldName": "instructor_id", "fieldAlias": "강사ID"}},
+                    {{"fieldName": "status", "fieldAlias": "상태"}},
+                    {{"fieldName": "price_amount", "fieldAlias": "가격금액"}},
+                    {{"fieldName": "price_currency", "fieldAlias": "가격통화"}},
+                    {{"fieldName": "created_at", "fieldAlias": "생성일시"}},
+                    {{"fieldName": "updated_at", "fieldAlias": "수정일시"}}
+                ]
             }},
             {{
                 "aggregateName": "Enrollment",
-                "ddl_fields": ["enrollment_id", "student_id", "enrollment_date", "completion_status"]
+                "ddl_fields": [
+                    {{"fieldName": "enrollment_id", "fieldAlias": "수강ID"}},
+                    {{"fieldName": "student_id", "fieldAlias": "학생ID"}},
+                    {{"fieldName": "enrollment_date", "fieldAlias": "수강일자"}},
+                    {{"fieldName": "completion_status", "fieldAlias": "완료상태"}}
+                ]
             }}
         ]
     }}
@@ -376,7 +488,7 @@ def generate_ddl_field_assignments(
     aggregate_drafts: List[Dict[str, str]],
     all_ddl_fields: List[str],
     generator_key: str = "test",
-    model_name: str = "gpt-4o-2024-08-06"
+    model_name: str = "gpt-4.1-2025-04-14"
 ) -> Dict[str, Any]:
     """
     Convenience function to generate DDL field assignments

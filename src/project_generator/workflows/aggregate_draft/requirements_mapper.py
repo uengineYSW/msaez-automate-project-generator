@@ -16,6 +16,7 @@ sys.path.insert(0, str(project_root))
 
 from src.project_generator.config import Config
 from src.project_generator.utils.logging_util import LoggingUtil
+from src.project_generator.utils.refs_trace_util import RefsTraceUtil
 
 
 class RequirementsMappingState(TypedDict):
@@ -149,7 +150,19 @@ class RequirementsMappingWorkflow:
             # 2. sanitizeAndConvertRefs: refs 변환
             # LLM이 반환한 refs 형식: [[startLine, "phrase"], [endLine, "phrase"]]
             # 이를 [[[startLine, startCol], [endLine, endCol]]] 형식으로 변환해야 함
-            sanitized_reqs = self._sanitize_and_convert_refs(relevant_reqs, requirements_text)
+            # 공통 유틸리티 사용 (프론트엔드와 동일)
+            sanitized_reqs = []
+            for req in relevant_reqs:
+                req_copy = dict(req)
+                refs = req.get('refs', [])
+                if refs:
+                    sanitized_data = RefsTraceUtil.sanitize_and_convert_refs(
+                        {'refs': refs},
+                        requirements_text,
+                        is_use_xml_base=True
+                    )
+                    req_copy['refs'] = sanitized_data.get('refs', refs) if isinstance(sanitized_data, dict) else sanitized_data
+                sanitized_reqs.append(req_copy)
             
             # 3. getReferencedUserRequirements: text 필드 추가
             enriched_reqs = self._add_text_to_requirements(sanitized_reqs, requirement_chunk)
@@ -274,6 +287,14 @@ class RequirementsMappingWorkflow:
                 <rule id="3">**Shortest Possible:** Use the shortest possible phrase that can locate the specific part of requirements</rule>
                 <rule id="4">**Valid Line Numbers:** Only reference lines that exist in the provided content</rule>
                 <rule id="5">**Precision:** Point to exact line numbers and phrases for accurate traceability</rule>
+            </section>
+
+            <section id="accuracy_requirements">
+                <title>Precision and Accuracy Standards</title>
+                <rule id="1">**Exact Segments:** Be precise in identifying the exact text segments that justify each requirement mapping</rule>
+                <rule id="2">**Avoid Vagueness:** Avoid generic or vague references that don't clearly support the bounded context</rule>
+                <rule id="3">**Verification:** Ensure that the referenced text actually justifies the requirement's relevance to the bounded context</rule>
+                <rule id="4">**Comprehensive Mapping:** If multiple sections contribute to a single requirement, include all relevant references</rule>
             </section>
 
             <section id="decision_strategy">
@@ -701,8 +722,6 @@ class RequirementsMappingWorkflow:
             start_line = requirement_chunk.get('startLine', 1)
             lines = text.split('\n')
             
-            LoggingUtil.info("RequirementsMapper", f"📄 Text extraction: start_line={start_line}, text_lines={len(lines)}, requirement_type={requirement_chunk.get('type', 'text')}")
-            
             # 텍스트에서 refs가 가리키는 내용 추출 (Frontend의 TextTraceUtil.getReferencedUserRequirements와 동일)
             # 프론트엔드: startLineOffset = requirementChunk.startLine - 1
             start_line_offset = start_line - 1
@@ -710,7 +729,6 @@ class RequirementsMappingWorkflow:
             for req_idx, req in enumerate(requirements):
                 refs = req.get('refs', [])
                 if not refs or len(refs) == 0:
-                    LoggingUtil.warning("RequirementsMapper", f"  Req[{req_idx}] ({req.get('type', 'unknown')}): No refs")
                     continue
                 
                 # refs 형식: [[[startLine, startCol], [endLine, endCol]]] (sanitizeAndConvertRefs 후)
@@ -719,7 +737,6 @@ class RequirementsMappingWorkflow:
                 
                 for ref_idx, ref in enumerate(refs):
                     if not isinstance(ref, list) or len(ref) < 2:
-                        LoggingUtil.warning("RequirementsMapper", f"  Req[{req_idx}] Ref[{ref_idx}]: Invalid format (not list or < 2)")
                         continue
                     
                     # ref 형식: [[startLine, startCol], [endLine, endCol]]
@@ -727,11 +744,9 @@ class RequirementsMappingWorkflow:
                     end_pos = ref[1] if len(ref) > 1 else ref[0]
                     
                     if not isinstance(start_pos, list) or not isinstance(end_pos, list):
-                        LoggingUtil.warning("RequirementsMapper", f"  Req[{req_idx}] Ref[{ref_idx}]: Invalid pos format - start_pos={type(start_pos)}, end_pos={type(end_pos)}")
                         continue
                     
                     if len(start_pos) < 2 or len(end_pos) < 2:
-                        LoggingUtil.warning("RequirementsMapper", f"  Req[{req_idx}] Ref[{ref_idx}]: Invalid pos length - start_pos={start_pos}, end_pos={end_pos}")
                         continue
                     
                     # Frontend와 동일: destructuring [[startLine, startCol], [endLine, endCol]]
@@ -747,11 +762,8 @@ class RequirementsMappingWorkflow:
                     e_line = end_line_num - start_line_offset - 1
                     e_col = end_col - 1
                     
-                    LoggingUtil.info("RequirementsMapper", f"  Req[{req_idx}] Ref[{ref_idx}]: line_num={start_line_num}~{end_line_num}, col={start_col}~{end_col}, start_line_offset={start_line_offset}, s_line={s_line}, e_line={e_line}, lines_length={len(lines)}")
-                    
                     # 범위 검증
                     if s_line < 0 or e_line >= len(lines) or s_line > e_line:
-                        LoggingUtil.warning("RequirementsMapper", f"  Req[{req_idx}] Ref[{ref_idx}]: Invalid line range - s_line={s_line}, e_line={e_line}, lines_length={len(lines)}, start_line={start_line}, start_line_offset={start_line_offset}")
                         continue
                     
                     extracted_text = ''

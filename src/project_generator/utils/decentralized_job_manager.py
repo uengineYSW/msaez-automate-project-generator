@@ -44,6 +44,8 @@ class DecentralizedJobManager:
             return "ddl_fields_generator"
         elif job_id.startswith("trace-add-"):
             return "traceability_generator"
+        elif job_id.startswith("std-trans-"):
+            return "standard_transformer"
         elif job_id.startswith("ddl-extract-"):
             return "ddl_extractor"
         elif job_id.startswith("req-valid-"):

@@ -88,10 +88,16 @@ spec:
         - name: LOG_LEVEL
           value: "INFO"
         
+        # 공유 스토리지 경로 설정 (PersistentVolume 마운트 경로)
+        - name: SHARED_STORAGE_PATH
+          value: "/shared-storage"
+        
         volumeMounts:
         - name: firebase-key-volume
           mountPath: /app/.auth
           readOnly: true
+        - name: shared-storage-volume
+          mountPath: /shared-storage
         resources:
           requests:
             memory: "512Mi"
@@ -115,6 +121,9 @@ spec:
       - name: firebase-key-volume
         secret:
           secretName: firebase-key
+      - name: shared-storage-volume
+        persistentVolumeClaim:
+          claimName: project-generator-storage
 ---
 apiVersion: v1
 kind: Service

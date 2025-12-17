@@ -38,9 +38,17 @@ class FirebaseSystem:
         except ValueError:
             # 앱이 초기화되지 않은 경우에만 초기화
             cred = credentials.Certificate(service_account_path)
-            firebase_admin.initialize_app(cred, {
+            # storageBucket은 환경 변수에서 가져오거나 None (기본값 사용)
+            storage_bucket = os.getenv('FIREBASE_STORAGE_BUCKET')
+            init_options = {
                 'databaseURL': database_url
-            })
+            }
+            if storage_bucket:
+                # gs:// prefix 제거 (있는 경우)
+                if storage_bucket.startswith('gs://'):
+                    storage_bucket = storage_bucket[5:]
+                init_options['storageBucket'] = storage_bucket
+            firebase_admin.initialize_app(cred, init_options)
         
         self.database = db
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
@@ -171,7 +179,36 @@ class FirebaseSystem:
         Returns:
             Dict[str, Any]: Firebase용으로 정제된 데이터
         """
-        return self.sanitize_data_for_firebase(data)
+        def protect_trace_map(value, path=""):
+            """
+            traceMap 객체를 Firebase가 배열로 변환하지 않도록 보호
+            traceMap의 키가 숫자 문자열인 경우, Firebase가 배열로 변환할 수 있으므로
+            재귀적으로 모든 traceMap을 찾아서 보호
+            """
+            if isinstance(value, dict):
+                result = {}
+                for k, v in value.items():
+                    current_path = f"{path}.{k}" if path else k
+                    # traceMap 필드를 찾으면 보호
+                    if k == 'traceMap' and isinstance(v, dict):
+                        # traceMap의 키가 숫자 문자열인 경우, Firebase가 배열로 변환할 수 있음
+                        # 하지만 비연속적인 키는 객체로 유지되어야 함
+                        # Firebase가 변환하지 않도록, 키를 그대로 유지 (문자열 키는 배열로 변환되지 않음)
+                        protected_trace_map = {}
+                        for map_key, map_value in v.items():
+                            protected_trace_map[str(map_key)] = protect_trace_map(map_value, f"{current_path}.{map_key}")
+                        result[k] = protected_trace_map
+                    else:
+                        result[k] = protect_trace_map(v, current_path)
+                return result
+            elif isinstance(value, list):
+                return [protect_trace_map(item, f"{path}[{i}]") for i, item in enumerate(value)]
+            else:
+                return value
+        
+        # traceMap 보호 후 sanitize
+        protected_data = protect_trace_map(data)
+        return self.sanitize_data_for_firebase(protected_data)
 
     # =============================================================================
     # 데이터 설정 메서드들

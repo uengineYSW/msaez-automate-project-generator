@@ -4,6 +4,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from src.project_generator.utils.logging_util import LoggingUtil
 from src.project_generator.systems.firebase_system import FirebaseSystem
+from src.project_generator.utils.refs_trace_util import RefsTraceUtil
 import json
 import re
 
@@ -133,7 +134,11 @@ def generate_sitemap(state: SiteMapState) -> SiteMapState:
         # 'ui' BC 필터링
         filtered_bcs = [bc for bc in state["bounded_contexts"] if bc.get("name") != "ui"]
         bounded_contexts_json = json.dumps(filtered_bcs, ensure_ascii=False, indent=2)
-        command_readmodel_json = json.dumps(state["command_readmodel_data"], ensure_ascii=False, indent=2)
+        # 프론트엔드와 동일하게 refs 제거 (RefsTraceUtil.removeRefsAttributes)
+        command_readmodel_data_without_refs = RefsTraceUtil.remove_refs_attributes(
+            state["command_readmodel_data"] or {}
+        )
+        command_readmodel_json = json.dumps(command_readmodel_data_without_refs, ensure_ascii=False, indent=2)
         
         # 기존 사이트맵 데이터를 existing_navigation으로 변환
         existing_navigation = state.get("site_map", {}).get("pages", [])

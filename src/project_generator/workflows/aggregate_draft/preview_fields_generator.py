@@ -43,6 +43,7 @@ class PreviewFieldsState(TypedDict):
     aggregateDrafts: List[Dict[str, Any]]
     generatorKey: str
     traceMap: Dict[str, Any]
+    originalRequirements: str  # 원본 요구사항 (userStory + ddl)
     
     # Processing
     lineNumberedRequirements: str
@@ -64,7 +65,7 @@ class PreviewFieldsState(TypedDict):
 class PreviewFieldsGenerator:
     """Preview Fields 생성 워크플로우"""
     
-    def __init__(self, model_name: str = "gpt-4o-2024-08-06", temperature: float = 0.7):
+    def __init__(self, model_name: str = "gpt-4.1-2025-04-14", temperature: float = 0.7):
         self.model_name = model_name
         self.temperature = temperature
         self.llm = None
@@ -77,6 +78,41 @@ class PreviewFieldsGenerator:
             numbered_lines.append(f"<{i}>{line}</{i}>")
         return '\n'.join(numbered_lines)
     
+    def _get_line_number_range(self, line_numbered_requirements: str) -> tuple:
+        """라인 번호 범위 계산 (프론트엔드 TextTraceUtil.getLineNumberRangeOfRequirements와 동일)"""
+        import re
+        
+        if not line_numbered_requirements:
+            return (1, 1)
+        
+        lines = line_numbered_requirements.strip().split('\n')
+        if not lines:
+            return (1, 1)
+        
+        # 첫 번째 라인에서 라인 번호 추출
+        first_line = lines[0]
+        first_match = re.match(r'^<(\d+)>', first_line)
+        min_line = int(first_match.group(1)) if first_match else 1
+        
+        # 마지막 라인에서 라인 번호 추출
+        last_line = lines[-1]
+        last_match = re.match(r'^<(\d+)>', last_line)
+        max_line = int(last_match.group(1)) if last_match else len(lines)
+        
+        return (min_line, max_line)
+    
+    def _get_line_number_validation_prompt(self, line_numbered_requirements: str) -> str:
+        """라인 번호 검증 프롬프트 생성 (프론트엔드 TextTraceUtil.getLineNumberValidationPrompt와 동일)"""
+        if not line_numbered_requirements:
+            return ''
+        
+        min_line, max_line = self._get_line_number_range(line_numbered_requirements)
+        return f"""
+IMPORTANT - LINE NUMBER VALIDATION RULE:
+When creating 'refs' arrays in your response, you MUST only use line numbers that exist in the Requirements.
+Valid line number range: {min_line} ~ {max_line}
+"""
+    
     def _build_persona_info(self) -> Dict[str, str]:
         """Persona 정보 생성"""
         return {
@@ -86,37 +122,72 @@ class PreviewFieldsGenerator:
         }
     
     def _build_guidelines(self) -> str:
-        """가이드라인 생성"""
+        """가이드라인 생성 (프론트엔드와 동일)"""
         return """<instruction>
     <core_instructions>
         <title>Aggregate Field Generation Task</title>
-        <task_description>Analyze functional requirements and generate appropriate field names with traceability information for each aggregate draft in a bounded context.</task_description>
+        <task_description>Your task is to analyze functional requirements and generate appropriate field names with traceability information for each aggregate draft in a bounded context. Generate comprehensive and semantically correct field sets that accurately represent the data each aggregate should contain according to the business requirements.</task_description>
         
+        <input_description>
+            <title>You will be given:</title>
+            <item id="1">**Functional Requirements:** The business context and domain description for the bounded context with line numbers for traceability</item>
+            <item id="2">**Aggregate Drafts:** A list of planned aggregates with their names and basic structure information</item>
+        </input_description>
+
         <guidelines>
+            <title>Field Generation Guidelines</title>
+            
             <section id="field_generation_rules">
                 <title>Field Generation Rules</title>
                 <rule id="1">**Business-Driven Generation:** Generate fields that directly support the business operations described in the functional requirements</rule>
-                <rule id="2">**Complete Coverage:** Each aggregate should have a comprehensive set of fields</rule>
-                <rule id="3">**Avoid Duplication:** Each field concept should appear in only one aggregate unless there's a clear business need</rule>
-                <rule id="4">**Domain Semantics:** Field names should reflect the business language</rule>
-                <rule id="5">**Consistent Naming:** Use consistent naming patterns (e.g., snake_case)</rule>
+                <rule id="2">**Complete Coverage:** Each aggregate should have a comprehensive set of fields that covers its full responsibility scope</rule>
+                <rule id="3">**Avoid Duplication:** Each field concept should appear in only one aggregate unless there's a clear business need for duplication</rule>
+                <rule id="4">**Domain Semantics:** Field names should reflect the business language and concepts used in the domain</rule>
+                <rule id="5">**Consistent Naming:** Use consistent naming patterns across all aggregates (e.g., snake_case, clear prefixes/suffixes)</rule>
             </section>
 
             <section id="field_categories">
                 <title>Standard Field Categories</title>
                 <rule id="1">**Identity Fields:** Each aggregate should have a primary identifier (e.g., "user_id", "order_id")</rule>
-                <rule id="2">**Core Business Fields:** Fields that represent the main business data</rule>
+                <rule id="2">**Core Business Fields:** Fields that represent the main business data for the aggregate</rule>
                 <rule id="3">**Lifecycle Fields:** Standard fields like "created_at", "updated_at", "status" where relevant</rule>
                 <rule id="4">**Relationship Fields:** Foreign key references to other aggregates when relationships exist</rule>
+                <rule id="5">**Metadata Fields:** Additional fields for versioning, auditing, or technical requirements when needed</rule>
+            </section>
+
+            <section id="domain_context">
+                <title>Domain Context Considerations</title>
+                <rule id="1">**Business Operations:** Consider what operations will be performed on each aggregate and what data they require</rule>
+                <rule id="2">**State Management:** Include fields needed to track the aggregate's state through its lifecycle</rule>
+                <rule id="3">**Business Rules:** Generate fields that support the business rules and constraints mentioned in the requirements</rule>
+                <rule id="4">**User Interactions:** Consider what data users will need to view, create, or modify for each aggregate</rule>
+            </section>
+
+            <section id="inference_process">
+                <title>Inference Process</title>
+                <rule id="1">**Domain Analysis:** Begin by understanding the business domain and identifying the core responsibilities of each aggregate</rule>
+                <rule id="2">**Extract Data Requirements:** From the functional requirements, identify what data is needed to support the described business operations</rule>
+                <rule id="3">**Map Data to Aggregates:** Assign data concepts to the most appropriate aggregate based on business ownership and responsibility</rule>
+                <rule id="4">**Apply Domain Language:** Use terminology and naming conventions that match the business domain vocabulary</rule>
+                <rule id="5">**Validate Business Logic:** Ensure the generated fields support the business operations and rules described in the requirements</rule>
+                <rule id="6">**Document Reasoning:** Clearly explain your field generation decisions, especially for complex or ambiguous cases</rule>
             </section>
 
             <section id="traceability">
                 <title>Source Traceability Requirements</title>
                 <rule id="1">**Mandatory Refs:** Each field MUST include a 'refs' array that traces back to specific parts of the functional requirements</rule>
                 <rule id="2">**Refs Format:** Use format [[[startLineNumber, "minimal_start_phrase"], [endLineNumber, "minimal_end_phrase"]]]</rule>
-                <rule id="3">**Minimal Phrases:** Use 1-2 word phrases that uniquely identify the position</rule>
-                <rule id="4">**Valid Line Numbers:** Refs must reference valid line numbers from the requirements</rule>
-                <rule id="5">**Complete Traceability:** Every generated field must have at least one traceability reference</rule>
+                <rule id="3">**Minimal Phrases:** Use 1-2 word phrases that uniquely identify the position in the requirement text</rule>
+                <rule id="4">**Valid Line Numbers:** Refs must reference valid line numbers from the provided functional requirements section</rule>
+                <rule id="5">**Multiple References:** Multiple reference ranges can be included if a field is derived from multiple requirement sections</rule>
+                <rule id="6">**Complete Traceability:** Every generated field must have at least one traceability reference</rule>
+            </section>
+
+            <section id="quality">
+                <title>Quality Guidelines</title>
+                <rule id="1">**Appropriate Granularity:** Generate fields at the right level of detail - not too generic, not overly specific</rule>
+                <rule id="2">**Future-Friendly:** Consider reasonable extensions and modifications that might be needed</rule>
+                <rule id="3">**Precision and Accuracy:** Be precise in identifying the exact text segments that justify each field</rule>
             </section>
         </guidelines>
 
@@ -125,10 +196,14 @@ class PreviewFieldsGenerator:
             <description>If functional requirements contain:</description>
             <example_requirements>
 <1># Course Management System</1>
+<2></2> 
 <3>As an instructor, I want to create and manage my courses. When creating a course, I need to provide a title, description, and price.</3>
 <4>Students can enroll in published courses.</4>
+<5></5>
+<6>## Key Events</6>
 <7>- CourseCreated</7>
 <8>- CoursePublished</8>
+<9>- StudentEnrolled</9>
             </example_requirements>
             <example_refs>
 - "course_id" field for Course aggregate → refs: [[[3, "create"], [3, "courses"]]]
@@ -136,8 +211,41 @@ class PreviewFieldsGenerator:
 - "status" field for course lifecycle → refs: [[[7, "CourseCreated"], [8, "CoursePublished"]]]
 - "student_id" field for enrollment → refs: [[[4, "Students"], [9, "StudentEnrolled"]]]
             </example_refs>
+            <note>The refs array contains ranges where each range is [[startLine, startPhrase], [endLine, endPhrase]]. Use the shortest possible phrase that can locate the specific part of requirements.</note>
         </refs_format_example>
     </core_instructions>
+    
+    <output_format>
+        <title>JSON Output Format</title>
+        <description>The output must be a JSON object structured as follows:</description>
+        <schema>
+{
+    "inference": "(Detailed reasoning for the field generation, including analysis of the domain context and explanation of field choices for each aggregate)",
+    "result": {
+        "aggregateFieldAssignments": [
+            {
+                "aggregateName": "(name_of_aggregate)",
+                "previewFields": [
+                    {
+                        "fieldName": "(field_name_1)",
+                        "refs": [[[startLineNumber, "minimal start phrase"], [endLineNumber, "minimal end phrase"]]]
+                    },
+                    {
+                        "fieldName": "(field_name_2)",
+                        "refs": [[[startLineNumber, "minimal start phrase"], [endLineNumber, "minimal end phrase"]]]
+                    }
+                ]
+            }
+        ]
+    }
+}
+        </schema>
+        <field_requirements>
+            <requirement id="1">All field names must use consistent naming patterns (e.g., snake_case)</requirement>
+            <requirement id="2">Every field must include a refs array with valid line number references</requirement>
+            <requirement id="3">Aggregate names must match the names provided in the input Aggregate Drafts</requirement>
+        </field_requirements>
+    </output_format>
 </instruction>"""
     
     def _build_prompt(self, state: PreviewFieldsState) -> str:
@@ -147,11 +255,16 @@ class PreviewFieldsGenerator:
         
         aggregates_xml = self._format_aggregates(state['aggregateDrafts'])
         
+        # 라인 번호 검증 프롬프트 추가 (프론트엔드와 동일하게)
+        line_number_validation = self._get_line_number_validation_prompt(state['lineNumberedRequirements'])
+        
         prompt = f"""You are a {persona['persona']}.
 
 {persona['goal']}
 
 {guidelines}
+
+{line_number_validation}
 
 ## Your Task:
 Analyze the following functional requirements and generate appropriate field names with traceability for each aggregate draft.
@@ -164,7 +277,8 @@ Analyze the following functional requirements and generate appropriate field nam
 
 ### Generator Key: {state.get('generatorKey', 'N/A')}
 
-Please generate comprehensive field sets for each aggregate with proper traceability references."""
+Please generate comprehensive field sets for each aggregate with proper traceability references.
+For each field in `previewFields`, include both `fieldName` (English name) and `fieldAlias` (Korean name/alias)."""
         
         return prompt
     
@@ -211,11 +325,16 @@ Please generate comprehensive field sets for each aggregate with proper traceabi
                                             "properties": {
                                                 "fieldName": {
                                                     "type": "string",
-                                                    "description": "The field name"
+                                                    "description": "The field name (English name)"
+                                                },
+                                                "fieldAlias": {
+                                                    "type": "string",
+                                                    "description": "The field alias (Korean name)"
                                                 },
                                                 "refs": {
                                                     "type": "array",
                                                     "description": "Traceability references",
+                                                    "minItems": 1,
                                                     "items": {
                                                         "type": "array",
                                                         "items": {
@@ -230,7 +349,7 @@ Please generate comprehensive field sets for each aggregate with proper traceabi
                                                     }
                                                 }
                                             },
-                                            "required": ["fieldName", "refs"],
+                                            "required": ["fieldName", "fieldAlias", "refs"],
                                             "additionalProperties": False
                                         }
                                     }
@@ -252,8 +371,6 @@ Please generate comprehensive field sets for each aggregate with proper traceabi
     
     def prepare_input(self, state: PreviewFieldsState) -> PreviewFieldsState:
         """입력 데이터 준비"""
-        LoggingUtil.info("PreviewFieldsGenerator", "Preparing input data...")
-        
         # Add line numbers to requirements
         description = state.get('description', '')
         state['lineNumberedRequirements'] = self._add_line_numbers(description)
@@ -272,7 +389,6 @@ Please generate comprehensive field sets for each aggregate with proper traceabi
     
     def generate_fields(self, state: PreviewFieldsState) -> PreviewFieldsState:
         """LLM을 사용하여 Preview Fields 생성"""
-        LoggingUtil.info("PreviewFieldsGenerator", "Generating preview fields...")
         aggregates = state.get('aggregateDrafts', [])
         
         try:
@@ -295,11 +411,22 @@ Please generate comprehensive field sets for each aggregate with proper traceabi
             
             # 응답 처리
             state['inference'] = response.get('inference', '')
-            state['aggregateFieldAssignments'] = response.get('result', {}).get('aggregateFieldAssignments', [])
+            assignments = response.get('result', {}).get('aggregateFieldAssignments', [])
+            state['aggregateFieldAssignments'] = assignments
             
-            # 생성된 결과 로깅
-            assignments = state['aggregateFieldAssignments']
-            LoggingUtil.info("PreviewFieldsGenerator", f"Completed: {len(assignments)} assignments")
+            # 생성된 결과 로깅 및 refs 확인
+            # LLM이 refs를 생성했는지 확인
+            # Refs 생성 확인
+            total_fields = 0
+            fields_with_refs = 0
+            for assignment in assignments:
+                for field in assignment.get('previewFields', []):
+                    total_fields += 1
+                    if field.get('refs') and len(field.get('refs', [])) > 0:
+                        fields_with_refs += 1
+            if fields_with_refs == 0 and total_fields > 0:
+                LoggingUtil.warning("PreviewFieldsGenerator", 
+                    "⚠️ LLM이 refs를 생성하지 않았습니다! 스키마에 minItems: 1이 적용되었는지 확인 필요")
             
             # 누락된 aggregate 검사
             input_aggregate_names = set(agg.get('name') for agg in aggregates)
@@ -330,22 +457,58 @@ Please generate comprehensive field sets for each aggregate with proper traceabi
     
     def finalize_output(self, state: PreviewFieldsState) -> PreviewFieldsState:
         """최종 출력 정리"""
-        LoggingUtil.info("PreviewFieldsGenerator", "Finalizing output...")
         
-        # Note: refs 변환은 프론트엔드에서 RefsTraceUtil을 사용하여 처리됨
-        # 백엔드는 LLM이 생성한 refs를 그대로 반환
+        # refs 변환: phrase → index → 원본 라인 (백엔드에서 클램핑 적용)
+        raw_requirements = state.get('originalRequirements', '') or state.get('description', '')
+        line_numbered_requirements = state.get('lineNumberedRequirements', '')
+        trace_map = state.get('traceMap', {})
+        
+        if state.get('aggregateFieldAssignments'):
+            self._convert_refs_to_indexes(
+                state['aggregateFieldAssignments'],
+                raw_requirements,
+                line_numbered_requirements,
+                trace_map
+            )
         
         # 검증: 각 aggregate가 최소한의 필드를 가지고 있는지 확인
+        # LLM이 특정 aggregate에 필드를 생성하지 않은 경우 진단을 위한 상세 로깅
+        input_aggregate_names = set(agg.get('name') for agg in state.get('aggregateDrafts', []))
+        output_aggregate_names = set()
+        
         for assignment in state.get('aggregateFieldAssignments', []):
-            if not assignment.get('previewFields') or len(assignment['previewFields']) == 0:
-                error_msg = f"Aggregate '{assignment.get('aggregateName', 'Unknown')}' has no generated fields"
-                LoggingUtil.error("PreviewFieldsGenerator", error_msg)
-                state['isFailed'] = True
+            aggregate_name = assignment.get('aggregateName', 'Unknown')
+            output_aggregate_names.add(aggregate_name)
+            preview_fields = assignment.get('previewFields', [])
+            
+            if not preview_fields or len(preview_fields) == 0:
+                # 상세 진단 정보 로깅
+                LoggingUtil.warning("PreviewFieldsGenerator", 
+                    f"Aggregate '{aggregate_name}' has no generated fields. "
+                    f"Input aggregates: {sorted(input_aggregate_names)}, "
+                    f"Output aggregates: {sorted(output_aggregate_names)}, "
+                    f"Total assignments: {len(state.get('aggregateFieldAssignments', []))}. "
+                    f"프로세스를 계속 진행합니다.")
+                
+                # LLM 응답 원본 확인
+                if state.get('inference'):
+                    LoggingUtil.debug("PreviewFieldsGenerator", 
+                        f"Inference for '{aggregate_name}': {state['inference'][:500]}...")
+                
+                # 경고만 로깅하고 프로세스 계속 진행 (프론트엔드에서 처리)
                 state['logs'].append({
-                    "message": error_msg,
-                    "timestamp": datetime.now().isoformat()
+                    "message": f"Aggregate '{aggregate_name}' has no generated fields (경고)",
+                    "timestamp": datetime.now().isoformat(),
+                    "level": "warning"
                 })
-                return state
+                # 프로세스 중단하지 않고 계속 진행
+                continue
+            
+            # 각 필드의 refs 검증
+            for field in assignment.get('previewFields', []):
+                if not field.get('refs') or len(field.get('refs', [])) == 0:
+                    LoggingUtil.warning("PreviewFieldsGenerator", 
+                        f"Field '{field.get('fieldName', 'unknown')}' in aggregate '{assignment.get('aggregateName', 'unknown')}' has empty refs")
         
         state['isCompleted'] = True
         state['progress'] = 100
@@ -355,6 +518,149 @@ Please generate comprehensive field sets for each aggregate with proper traceabi
         })
         
         return state
+    
+    def _restore_trace_map(self, trace_map):
+        """Firebase가 배열로 변환한 traceMap을 객체로 복원"""
+        if not trace_map:
+            return {}
+        
+        # 이미 객체 형태인 경우 그대로 반환
+        if isinstance(trace_map, dict) and not isinstance(trace_map, list):
+            # 문자열 키 그대로 유지하되, 숫자 키로도 접근 가능하도록 양쪽 모두 저장
+            # (프론트엔드 RefsTraceUtil.convertToOriginalRefsUsingTraceMap에서 traceMap[i] || traceMap[String(i)]로 접근)
+            normalized_trace_map = {}
+            for key, value in trace_map.items():
+                normalized_trace_map[key] = value
+                # 숫자로 변환 가능하면 숫자 키로도 저장 (양쪽 모두 접근 가능)
+                try:
+                    num_key = int(key)
+                    if str(num_key) == str(key):
+                        normalized_trace_map[num_key] = value
+                except (ValueError, TypeError):
+                    pass
+            return normalized_trace_map
+        
+        # 배열 형태인 경우 변환
+        restored_trace_map = {}
+        if isinstance(trace_map, list):
+            for index, item in enumerate(trace_map):
+                if not item:
+                    continue
+                # {"key":"4","value":{...}} 형태인 경우
+                if isinstance(item, dict) and 'key' in item and 'value' in item:
+                    key = item['key']
+                    restored_trace_map[str(key)] = item['value']
+                    # 숫자로 변환 가능하면 숫자 키로도 저장 (양쪽 모두 접근 가능)
+                    try:
+                        num_key = int(key)
+                        if str(num_key) == str(key):
+                            restored_trace_map[num_key] = item['value']
+                    except (ValueError, TypeError):
+                        pass
+                else:
+                    # Firebase가 비연속 숫자 키 객체를 배열로 변환한 경우
+                    # 배열 인덱스가 원래 키와 일치함 (예: 인덱스 4 = 원래 키 "4")
+                    # None이 아닌 항목의 인덱스를 키로 사용
+                    if isinstance(item, dict):
+                        # 인덱스를 키로 사용 (문자열과 숫자 모두 저장)
+                        restored_trace_map[index] = item
+                        restored_trace_map[str(index)] = item
+        
+        return restored_trace_map
+    
+    def _convert_refs_to_indexes(
+        self,
+        aggregate_field_assignments: List[Dict],
+        raw_requirements: str,
+        line_numbered_requirements: str,
+        trace_map: Dict
+    ) -> None:
+        """refs를 phrase → indexes로 변환 (프론트엔드 RefsTraceUtil과 동일)"""
+        from project_generator.workflows.aggregate_draft.traceability_generator import TraceabilityGenerator
+        
+        # rawRequirements 디버깅: 길이와 라인 수 확인
+        if not raw_requirements:
+            LoggingUtil.warning("PreviewFieldsGenerator", 
+                "⚠️ rawRequirements가 비어있습니다! description을 사용합니다.")
+        
+        # traceMap 복원 (Firebase가 배열로 변환한 경우 처리)
+        trace_map = self._restore_trace_map(trace_map)
+        
+        # TraceabilityGenerator의 변환 메서드 재사용
+        temp_generator = TraceabilityGenerator()
+        
+        total_fields = 0
+        converted_fields = 0
+        failed_fields = 0
+        
+        for assignment in aggregate_field_assignments:
+            for field in assignment.get('previewFields', []):
+                if 'refs' not in field or not field['refs']:
+                    continue
+                
+                total_fields += 1
+                original_refs = field['refs']
+                
+                try:
+                    # 1. sanitizeAndConvertRefs: phrase → [[[line, col], [line, col]]]
+                    # 공통 유틸리티 사용 (프론트엔드와 동일)
+                    from project_generator.utils.refs_trace_util import RefsTraceUtil
+                    sanitized_data = RefsTraceUtil.sanitize_and_convert_refs(
+                        {'refs': original_refs},
+                        line_numbered_requirements,
+                        is_use_xml_base=True
+                    )
+                    sanitized_refs = sanitized_data.get('refs', original_refs) if isinstance(sanitized_data, dict) else sanitized_data
+                    
+                    if not sanitized_refs:
+                        # 원본 refs 유지 (빈 배열로 덮어쓰지 않음)
+                        failed_fields += 1
+                        continue
+                    
+                    field['refs'] = sanitized_refs
+                    
+                    # 2. validateRefs: 범위 검증
+                    try:
+                        temp_generator._validate_refs(field['refs'], raw_requirements)
+                    except Exception as e:
+                        LoggingUtil.warning("PreviewFieldsGenerator", 
+                            f"Field '{field.get('fieldName', 'unknown')}'의 refs 검증 실패: {str(e)}, sanitized_refs={sanitized_refs}")
+                        # 원본 refs로 복원 (빈 배열로 덮어쓰지 않음)
+                        field['refs'] = original_refs
+                        failed_fields += 1
+                        continue
+                    
+                    # 3. convertToOriginalRefsUsingTraceMap: traceMap 사용해 원본 라인으로 역변환
+                    if trace_map:
+                        # traceMap 복원 확인
+                        if isinstance(trace_map, list):
+                            trace_map = self._restore_trace_map(trace_map)
+                        
+                        # 공통 유틸리티 사용 (프론트엔드와 동일, 클램핑 없음)
+                        converted_refs = RefsTraceUtil.convert_to_original_refs_using_trace_map(
+                            field['refs'],
+                            trace_map
+                        )
+                        
+                        if not converted_refs:
+                            # 변환 실패 시 sanitized_refs 유지 (프론트엔드에서 재변환 시도)
+                            field['refs'] = sanitized_refs
+                            failed_fields += 1
+                        else:
+                            field['refs'] = converted_refs
+                            converted_fields += 1
+                    else:
+                        # trace_map이 없으면 sanitized_refs 그대로 사용
+                        converted_fields += 1
+                            
+                except Exception as e:
+                    # 원본 refs 유지 (빈 배열로 덮어쓰지 않음)
+                    field['refs'] = original_refs
+                    failed_fields += 1
+        
+        if failed_fields > 0:
+            LoggingUtil.warning("PreviewFieldsGenerator", 
+                f"Refs 변환: {converted_fields}/{total_fields} 성공, {failed_fields} 실패")
     
     # ==================== Workflow Construction ====================
     
@@ -377,14 +683,14 @@ Please generate comprehensive field sets for each aggregate with proper traceabi
     
     def run(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """워크플로우 실행"""
-        LoggingUtil.info("PreviewFieldsGenerator", "Starting workflow")
         
-        # 초기 상태 설정
+        # 초기 상태 설정 (프론트엔드 에이전트 방식과 동일하게 description만 사용)
         initial_state: PreviewFieldsState = {
             'description': input_data.get('description', ''),
             'aggregateDrafts': input_data.get('aggregateDrafts', []),
             'generatorKey': input_data.get('generatorKey', 'default'),
             'traceMap': input_data.get('traceMap', {}),
+            'originalRequirements': input_data.get('originalRequirements', ''),  # 원본 요구사항 (userStory + ddl)
             'lineNumberedRequirements': '',
             'prompt': '',
             'inference': '',

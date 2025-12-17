@@ -5,6 +5,7 @@ import json
 import re
 
 from project_generator.utils.logging_util import LoggingUtil
+from project_generator.utils.refs_trace_util import RefsTraceUtil
 
 
 class DDLExtractorState(TypedDict):
@@ -24,7 +25,7 @@ class DDLExtractor:
 
     def __init__(self):
         self.llm = ChatOpenAI(
-            model="gpt-4o-2024-08-06",
+            model="gpt-4.1-2025-04-14",
             temperature=0,
             streaming=False,
             model_kwargs={
@@ -62,10 +63,20 @@ class DDLExtractor:
             # 5. JSON 파싱
             response_text = response.content if hasattr(response, 'content') else str(response)
             result_data = json.loads(response_text)
+            
+            # LLM이 refs를 생성했는지 확인
+            raw_ddl_field_refs = result_data.get('result', {}).get('ddlFieldRefs', [])
+            total_fields = len(raw_ddl_field_refs)
+            fields_with_refs = sum(1 for field in raw_ddl_field_refs if field.get('refs') and len(field.get('refs', [])) > 0)
+            LoggingUtil.info("DDLExtractor", 
+                f"Refs 생성 확인: {fields_with_refs}/{total_fields} 필드에 refs 생성됨")
+            if fields_with_refs == 0 and total_fields > 0:
+                LoggingUtil.warning("DDLExtractor", 
+                    "⚠️ LLM이 refs를 생성하지 않았습니다! 프롬프트를 확인하거나 structured output을 고려하세요")
 
             # 6. refs 변환 (phrase → indexes → absolute refs)
             ddl_field_refs = self._convert_refs_to_indexes(
-                result_data.get('result', {}).get('ddlFieldRefs', []),
+                raw_ddl_field_refs,
                 ddl_text,
                 line_numbered_ddl,
                 line_trace_map
@@ -153,8 +164,16 @@ You are a highly specialized parsing engine designed to understand and deconstru
 
 **Traceability (refs):**
 - Format: [[[startLineNumber, "minimal_start_phrase"], [endLineNumber, "minimal_end_phrase"]]]
-- Use 1-2 word phrases that uniquely identify the position
+- Use MINIMAL phrases (1-2 words) that uniquely identify the position in the DDL text
+- Use the shortest possible phrase that can accurately locate the specific part of the DDL
 - Must reference valid line numbers from the DDL text
+- **CRITICAL:** startLineNumber and endLineNumber MUST be NUMBERS (not strings). Phrases MUST be NON-EMPTY strings (at least 1 character). Empty strings "" in phrases are STRICTLY FORBIDDEN.
+
+**Precision and Accuracy Standards:**
+- **Exact Segments:** Be precise in identifying the exact text segments that contain each field name
+- **Avoid Vagueness:** Avoid generic or vague references that don't clearly point to the field location
+- **Verification:** Ensure that the referenced text actually contains the field name
+- **Comprehensive Mapping:** If a field appears in multiple places, reference all occurrences
 
 **CRITICAL OUTPUT REQUIREMENTS:**
 - You MUST output ONLY valid JSON, no explanations, no markdown code fences
@@ -207,11 +226,27 @@ Please extract all DDL field names with their position references."""
             field_name = field_ref.get('fieldName', '')
             refs = field_ref.get('refs', [])
 
-            if not field_name or not refs:
+            if not field_name:
+                continue
+            
+            # refs가 없어도 필드는 포함 (빈 배열로 설정)
+            if not refs:
+                LoggingUtil.warning("DDLExtractor", 
+                    f"Field '{field_name}' has no refs, will be included with empty refs array")
+                converted_fields.append({
+                    'fieldName': field_name,
+                    'refs': []
+                })
                 continue
 
             # 1. sanitizeAndConvertRefs: phrase → [[[line, col], [line, col]]]
-            sanitized_refs = self._sanitize_and_convert_refs(refs, line_numbered_ddl)
+            # 공통 유틸리티 사용 (프론트엔드와 동일)
+            sanitized_data = RefsTraceUtil.sanitize_and_convert_refs(
+                {'refs': refs},
+                line_numbered_ddl,
+                is_use_xml_base=True
+            )
+            sanitized_refs = sanitized_data.get('refs', refs) if isinstance(sanitized_data, dict) else sanitized_data
 
             # 2. absolute refs로 변환
             absolute_refs = self._convert_to_absolute_refs(

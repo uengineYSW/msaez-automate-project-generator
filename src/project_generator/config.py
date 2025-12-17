@@ -121,6 +121,29 @@ class Config:
     VECTORSTORE_PATH = os.getenv('VECTORSTORE_PATH', './knowledge_base/vectorstore')
     EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'text-embedding-3-small')
     
+    # 표준 변환 시스템 설정
+    # 임계값 0.8: 행별 청킹 + 핵심 키워드만 포함으로 유사도 향상
+    # 필수 매핑은 전체 표준 원본을 직접 읽어서 global mapping 구성 (유사도 검색과 무관)
+    # 각 행이 독립적으로 임베딩되고 검색 키워드(한글명, 영문명)만 포함
+    # OpenAI 임베딩: "주문" vs "주문 Order" → 90%+ 예상
+    STANDARD_TRANSFORMER_SCORE_THRESHOLD = float(os.getenv('STANDARD_TRANSFORMER_SCORE_THRESHOLD', '0.8'))
+    
+    # Knowledge Base 경로 설정
+    from pathlib import Path
+    # __file__ = backend-generators/src/project_generator/config.py
+    # parent.parent.parent = backend-generators/
+    _project_root = Path(__file__).parent.parent.parent
+    
+    # 공유 스토리지 경로 (Kubernetes PersistentVolume 등)
+    # 설정되지 않으면 기본 경로 사용
+    _shared_storage = os.getenv('SHARED_STORAGE_PATH')
+    if _shared_storage:
+        _base_path = Path(_shared_storage)
+    else:
+        _base_path = _project_root
+    
+    COMPANY_STANDARDS_PATH = _base_path / 'knowledge_base' / 'company_standards'
+    
     # LLM 설정 (OpenAI 실제 모델)
     DEFAULT_LLM_MODEL = os.getenv('DEFAULT_LLM_MODEL', 'gpt-4o')  # OpenAI 최신 모델
     DEFAULT_LLM_TEMPERATURE = float(os.getenv('DEFAULT_LLM_TEMPERATURE', '0.2'))  # Frontend와 동일

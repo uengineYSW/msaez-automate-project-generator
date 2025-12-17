@@ -37,3 +37,20 @@ firebase-credentials.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Vector Store (user-specific)
+knowledge_base/vectorstore/
+knowledge_base/company_standards/*/vectorstore/
+
+# Result files (test outputs)
+result/
+
+# Python virtual environment
+venv/
+.venv/
+env/
+.env/
+
+# LangGraph
+.langgraph/
+langgraph.json.local

@@ -10,6 +10,7 @@ from langchain_core.utils.function_calling import convert_to_openai_function
 from langchain_core.output_parsers import JsonOutputParser
 from project_generator.utils.logging_util import LoggingUtil
 from project_generator.systems.firebase_system import FirebaseSystem
+from project_generator.utils.refs_trace_util import RefsTraceUtil
 from langgraph.graph import StateGraph, END
 
 class AggregateDraftState(TypedDict):
@@ -289,12 +290,20 @@ class AggregateDraftGenerator:
         accumulated_drafts = state.get('accumulated_drafts', {})
         bc_aggregates = bc.get('aggregates', [])
         
+        # 프론트엔드 DraftGeneratorByFunctions.__sanitizeAccumulatedDrafts와 동일
+        # accumulated_drafts에서 refs 제거 (복사본 사용, 원본 state는 수정하지 않음)
+        sanitized_accumulated_drafts = accumulated_drafts
+        if accumulated_drafts:
+            import copy
+            sanitized_accumulated_drafts = copy.deepcopy(accumulated_drafts)
+            sanitized_accumulated_drafts = RefsTraceUtil.remove_refs_attributes(sanitized_accumulated_drafts)
+        
         # 프롬프트 구성
         prompt = self._build_prompt(
             bc_name, bc_alias, description,
             state.get('requirements_text', ''),
             state.get('context_relations_text', ''),
-            accumulated_drafts,
+            sanitized_accumulated_drafts,  # refs가 제거된 복사본 사용
             bc_aggregates
         )
         
@@ -302,11 +311,46 @@ class AggregateDraftGenerator:
             # LLM 호출
             result = self.llm_structured.invoke(prompt)
             
-            LoggingUtil.info("AggregateDraftGenerator", f"Completed: {len(result.get('result', {}).get('options', []))} options for {bc_name}")
+            # LLM이 생성한 options 가져오기
+            options = result.get('result', {}).get('options', [])
+            
+            # 각 option에 boundedContext.requirements.traceMap 추가
+            # 입력으로 받은 bounded_context에서 requirements.traceMap 가져오기
+            bc_requirements = bc.get('requirements', {})
+            trace_map = bc_requirements.get('traceMap') if isinstance(bc_requirements, dict) else None
+            
+            # 각 option에 boundedContext 필드 추가/보완
+            for option in options:
+                # boundedContext 필드가 없으면 생성
+                if 'boundedContext' not in option:
+                    option['boundedContext'] = {}
+                
+                # requirements 필드가 없으면 생성
+                if 'requirements' not in option['boundedContext']:
+                    option['boundedContext']['requirements'] = {}
+                
+                # traceMap이 있으면 추가 (없으면 빈 객체라도 추가)
+                if trace_map is not None:
+                    option['boundedContext']['requirements']['traceMap'] = trace_map
+                elif 'traceMap' not in option['boundedContext']['requirements']:
+                    option['boundedContext']['requirements']['traceMap'] = {}
+                
+                # structure의 각 항목에 enumerations, valueObjects 보장
+                if 'structure' in option:
+                    for structure_item in option['structure']:
+                        # enumerations가 없으면 빈 배열로 초기화
+                        if 'enumerations' not in structure_item:
+                            structure_item['enumerations'] = []
+                        
+                        # valueObjects가 없으면 빈 배열로 초기화
+                        if 'valueObjects' not in structure_item:
+                            structure_item['valueObjects'] = []
+            
+            LoggingUtil.info("AggregateDraftGenerator", f"Completed: {len(options)} options for {bc_name}")
             
             return {
                 "inference": result.get('inference', ''),
-                "options": result.get('result', {}).get('options', []),
+                "options": options,
                 "default_option_index": result.get('result', {}).get('defaultOptionIndex', 1),
                 "conclusions": result.get('result', {}).get('conclusions', ''),
                 "progress": 80,
@@ -426,7 +470,7 @@ Please consider including aggregates with the following names: {', '.join([f"{ag
 </suggested_aggregates>
 
 ## Task
-Generate 3-5 aggregate design options for this bounded context. Each option should propose different approaches to organizing aggregates.
+Generate 2-3 aggregate design options for this bounded context. Each option should propose different approaches to organizing aggregates.
 
 Default Option Selection Priority: Consistency > Event Alignment > Context Integration > Domain Alignment > Performance > Maintainability > Flexibility
 

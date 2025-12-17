@@ -9,6 +9,14 @@ MSA-EZ Event Storming 자동화를 위한 LangGraph 기반 UserStory 생성 백�
 ### 주요 기능
 
 - ✅ **UserStory Generator**: RAG 기반 User Story 자동 생성
+- ✅ **Bounded Context Generator**: 요구사항 기반 Bounded Context 자동 생성
+- ✅ **Aggregate Draft Generator**: Aggregate 초안 자동 생성
+- ✅ **Standard Transformer**: 회사 표준 문서 기반 자동 변환 (RAG)
+- ✅ **Traceability Generator**: 도메인 객체와 요구사항 간 추적성(refs) 생성
+- ✅ **Preview Fields Generator**: Aggregate 필드 자동 생성
+- ✅ **DDL Fields Generator**: DDL 기반 필드 매핑
+- ✅ **Requirements Mapper**: 요구사항 매핑
+- ✅ **Requirements Validator**: 요구사항 검증
 - 🔥 **Firebase Integration**: Job Queue 방식의 비동기 처리
 - 🚀 **Auto Scaling**: Kubernetes 환경에서 자동 스케일링
 - 📊 **Health Check**: `/ok` 엔드포인트 제공
@@ -95,8 +103,28 @@ backend-generators/
     ├── workflows/
     │   ├── user_story/
     │   │   └── user_story_generator.py  # UserStory LangGraph 워크플로우
+    │   ├── summarizer/
+    │   │   └── requirements_summarizer.py  # 요구사항 요약
+    │   ├── bounded_context/
+    │   │   └── bounded_context_generator.py  # Bounded Context 생성
+    │   ├── sitemap/
+    │   │   ├── command_readmodel_extractor.py  # Command/ReadModel 추출
+    │   │   └── sitemap_generator.py  # SiteMap 생성
+    │   ├── aggregate_draft/
+    │   │   ├── aggregate_draft_generator.py  # Aggregate 초안 생성
+    │   │   ├── standard_transformer.py  # 표준 변환 (RAG 기반)
+    │   │   ├── traceability_generator.py  # 추적성(refs) 생성
+    │   │   ├── preview_fields_generator.py  # Preview Fields 생성
+    │   │   ├── ddl_fields_generator.py  # DDL Fields 매핑
+    │   │   ├── ddl_extractor.py  # DDL 필드 추출
+    │   │   └── requirements_mapper.py  # 요구사항 매핑
+    │   ├── requirements_validation/
+    │   │   └── requirements_validator.py  # 요구사항 검증
     │   └── common/
-    │       └── rag_retriever.py         # RAG Knowledge Base
+    │       ├── rag_retriever.py  # RAG Knowledge Base
+    │       ├── standard_loader.py  # 표준 문서 로더
+    │       ├── standard_indexer.py  # 표준 문서 인덱서
+    │       └── standard_rag_service.py  # 표준 RAG 서비스
     ├── systems/
     │   └── firebase_system.py  # Firebase 연동
     ├── utils/
@@ -109,12 +137,33 @@ backend-generators/
         └── (Legacy compatibility models)
 ├── .env                        # 환경 변수
 ├── .gitignore                  # Git 제외 파일
-└── pyproject.toml              # Python 프로젝트 설정
+├── pyproject.toml              # Python 프로젝트 설정
+└── knowledge_base/             # 표준 문서 및 Vector Store
+    ├── company_standards/       # 표준 문서 디렉토리
+    └── vectorstore/             # ChromaDB 저장소
 ```
 
 ## 🔧 주요 컴포넌트
 
-### UserStoryWorkflow
+### 지원하는 워크플로우
+
+백엔드는 다음 워크플로우를 지원합니다:
+
+1. **UserStory Generator** (`usgen-*`): RAG 기반 User Story 자동 생성
+2. **Requirements Summarizer** (`summ-*`): 요구사항 요약
+3. **Bounded Context Generator** (`bcgen-*`): Bounded Context 자동 생성
+4. **Command/ReadModel Extractor** (`cmrext-*`): Command와 ReadModel 추출
+5. **SiteMap Generator** (`smapgen-*`): SiteMap 생성
+6. **Requirements Mapper** (`reqmap-*`): 요구사항 매핑
+7. **Aggregate Draft Generator** (`aggr-draft-*`): Aggregate 초안 생성
+8. **Preview Fields Generator** (`preview-fields-*`): Preview Fields 생성
+9. **DDL Fields Generator** (`ddl-fields-*`): DDL Fields 매핑
+10. **Traceability Generator** (`trace-add-*`): 추적성(refs) 생성
+11. **Standard Transformer** (`std-trans-*`): 표준 변환 (RAG 기반)
+12. **DDL Extractor** (`ddl-extract-*`): DDL 필드 추출
+13. **Requirements Validator** (`req-valid-*`): 요구사항 검증
+
+### UserStoryWorkflow 예시
 
 ```python
 from project_generator.workflows.user_story.user_story_generator import UserStoryWorkflow
@@ -248,8 +297,10 @@ echo $OPENAI_API_KEY
 
 1. `workflows/` 폴더에 새 디렉토리 생성
 2. LangGraph `StateGraph` 정의
-3. `main.py`에 처리 함수 추가
-4. `decentralized_job_manager.py`에 네임스페이스 추가
+3. `main.py`에 `process_*_job` 함수 추가
+4. `main.py`의 `process_job_async`에 Job ID prefix 라우팅 추가
+5. `decentralized_job_manager.py`의 `monitored_namespaces`에 네임스페이스 추가
+6. `job_util.py`의 `_get_namespace_from_job_id`에 Job ID prefix 패턴 추가
 
 ### 테스트
 
