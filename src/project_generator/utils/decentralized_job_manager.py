@@ -5,6 +5,8 @@ import os
 import sys
 from typing import Optional, List, Tuple
 
+from kubernetes import client, config
+
 from ..systems import FirebaseSystem
 from ..config import Config
 from .logging_util import LoggingUtil
@@ -20,6 +22,19 @@ class DecentralizedJobManager:
         self.shutdown_event = asyncio.Event()  # Graceful shutdown 완료 이벤트
         self.job_removal_requested = False  # 현재 작업 제거 요청 플래그
         self.job_cancellation_flags = {}  # 작업별 취소 플래그 {job_id: asyncio.Event}
+        
+        # Kubernetes 클라이언트 초기화 (Pod 존재 여부 확인용)
+        self.k8s_client = None
+        self.k8s_namespace = Config.autoscaler_namespace()
+        try:
+            try:
+                config.load_incluster_config()
+            except:
+                config.load_kube_config()
+            self.k8s_client = client.CoreV1Api()
+        except Exception as e:
+            LoggingUtil.warning("decentralized_job_manager", f"Kubernetes 클라이언트 초기화 실패 (로컬 실행일 수 있음): {e}")
+            self.k8s_client = None
     
     @staticmethod
     def _get_namespace_from_job_id(job_id: str) -> str:
@@ -211,6 +226,54 @@ class DecentralizedJobManager:
             finally:
                 self.current_task = None
 
+    def _check_pod_exists(self, pod_name: str) -> bool:
+        """Kubernetes에서 Pod 존재 여부 확인"""
+        if not self.k8s_client:
+            # Kubernetes 클라이언트가 없으면 (로컬 실행 등) 존재한다고 가정
+            return True
+        
+        try:
+            pod = self.k8s_client.read_namespaced_pod(
+                name=pod_name,
+                namespace=self.k8s_namespace
+            )
+            # Pod가 존재하고 Running 상태인지 확인
+            return pod.status.phase == 'Running'
+        except client.exceptions.ApiException as e:
+            if e.status == 404:
+                # Pod가 존재하지 않음
+                return False
+            else:
+                # 다른 오류는 로그만 남기고 존재한다고 가정 (안전하게)
+                LoggingUtil.warning("decentralized_job_manager", f"Pod {pod_name} 확인 중 오류: {e}")
+                return True
+        except Exception as e:
+            LoggingUtil.warning("decentralized_job_manager", f"Pod {pod_name} 확인 중 예외: {e}")
+            return True  # 오류 시 안전하게 존재한다고 가정
+
+    async def _reset_orphaned_job_assignment(self, job_id: str):
+        """Orphaned job의 assignedPodId를 제거"""
+        try:
+            ref = FirebaseSystem.instance().database.reference(self._get_requested_job_path(job_id))
+            job_data = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: ref.get()
+            )
+            
+            if job_data:
+                restored_data = FirebaseSystem.instance().restore_data_from_firebase(job_data)
+                # assignedPodId를 None으로 설정
+                restored_data['assignedPodId'] = None
+                # status가 processing이면 pending으로 변경
+                if restored_data.get('status') == 'processing':
+                    restored_data['status'] = 'pending'
+                
+                sanitized_data = FirebaseSystem.instance().sanitize_data_for_firebase(restored_data)
+                await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: ref.set(sanitized_data)
+                )
+                LoggingUtil.info("decentralized_job_manager", f"✅ Orphaned job {job_id}의 assignedPodId 제거 완료")
+        except Exception as e:
+            LoggingUtil.exception("decentralized_job_manager", f"Orphaned job {job_id}의 assignedPodId 제거 실패", e)
 
     async def find_and_process_next_job(self, requested_jobs: dict):
         """사용 가능한 다음 Job 찾기 및 처리 시작 (FIFO 순서)"""
@@ -226,10 +289,18 @@ class DecentralizedJobManager:
         
         # 할당되지 않은 Job 찾기 (시간순으로)
         for job_id, job_data in sorted_jobs:
-            # assignedPodId가 없고, status가 'failed'가 아닌 작업만 고려
             assigned_pod = job_data.get('assignedPodId')
             status = job_data.get('status')
-            LoggingUtil.debug("decentralized_job_manager", f"Job {job_id} 확인 - assignedPodId: {assigned_pod}, status: {status}")
+            LoggingUtil.info("decentralized_job_manager", f"🔍 Job {job_id} 확인 - assignedPodId: {assigned_pod}, status: {status}")
+            
+            # assignedPodId가 있지만 Pod가 존재하지 않으면 orphaned job으로 간주하고 claim 시도
+            if assigned_pod and assigned_pod != self.pod_id:
+                pod_exists = self._check_pod_exists(assigned_pod)
+                if not pod_exists:
+                    LoggingUtil.warning("decentralized_job_manager", f"⚠️  Job {job_id}는 Pod {assigned_pod}에 할당되어 있지만 해당 Pod가 존재하지 않음. Orphaned job으로 간주하고 claim 시도...")
+                    # Firebase에서 assignedPodId를 제거하여 claim 가능하도록 함
+                    await self._reset_orphaned_job_assignment(job_id)
+                    assigned_pod = None
             
             if assigned_pod is None and status != 'failed':
                 LoggingUtil.info("decentralized_job_manager", f"🎯 Job {job_id} claim 시도...")
@@ -243,7 +314,7 @@ class DecentralizedJobManager:
                 else:
                     LoggingUtil.warning("decentralized_job_manager", f"❌ Job {job_id} claim 실패")
             else:
-                LoggingUtil.debug("decentralized_job_manager", f"⏭️  Job {job_id} 스킵 (이미 할당됨 또는 실패)")
+                LoggingUtil.info("decentralized_job_manager", f"⏭️  Job {job_id} 스킵 (assignedPodId: {assigned_pod}, status: {status})")
 
     async def atomic_claim_job(self, job_id: str) -> bool:
         """원자적 작업 클레임"""
@@ -254,9 +325,11 @@ class DecentralizedJobManager:
 
             restored_data = FirebaseSystem.instance().restore_data_from_firebase(current_data)
             
+            # assignedPodId가 이미 설정되어 있으면 claim 불가
             if restored_data.get('assignedPodId') is not None:
                 return current_data
 
+            # assignedPodId가 None인 경우에만 claim
             restored_data['assignedPodId'] = self.pod_id
             restored_data['claimedAt'] = time.time()
             restored_data['status'] = 'processing'

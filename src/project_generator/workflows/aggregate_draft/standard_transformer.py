@@ -484,7 +484,12 @@ class AggregateDraftStandardTransformer:
                                 # RAGRetriever 재초기화
                                 from src.project_generator.workflows.common.rag_retriever import RAGRetriever
                                 self.rag_retriever = RAGRetriever(vectorstore_path=str(vectorstore_path))
-                                LoggingUtil.info("StandardTransformer", "✅ Vector Store 재초기화 완료")
+                                # 재초기화 후 초기화 상태 확인
+                                if not self.rag_retriever._initialized or not self.rag_retriever.vectorstore:
+                                    LoggingUtil.warning("StandardTransformer", 
+                                                      f"⚠️  Vector Store 재초기화 실패: _initialized={self.rag_retriever._initialized}, vectorstore={self.rag_retriever.vectorstore is not None}")
+                                else:
+                                    LoggingUtil.info("StandardTransformer", "✅ Vector Store 재초기화 완료")
                                 if vectorstore_clear_key:
                                     AggregateDraftStandardTransformer._vectorstore_cleared_sessions.add(vectorstore_clear_key)
                             except Exception as cleanup_e:
@@ -1554,6 +1559,24 @@ class AggregateDraftStandardTransformer:
             # 모든 파일/시트 처리 후 한번에 인덱싱 (세션당 한 번만)
             if all_documents_to_index and self.rag_retriever and should_index:
                 try:
+                    # Vector Store 초기화 상태 확인 및 재초기화 시도
+                    if not self.rag_retriever._initialized or not self.rag_retriever.vectorstore:
+                        LoggingUtil.warning("StandardTransformer", 
+                                          f"⚠️  Vector Store가 초기화되지 않음. 재초기화 시도...")
+                        # 재초기화 시도
+                        if hasattr(self.rag_retriever, 'vectorstore_path'):
+                            try:
+                                from src.project_generator.workflows.common.rag_retriever import RAGRetriever
+                                self.rag_retriever = RAGRetriever(vectorstore_path=self.rag_retriever.vectorstore_path)
+                                if self.rag_retriever._initialized and self.rag_retriever.vectorstore:
+                                    LoggingUtil.info("StandardTransformer", "✅ Vector Store 재초기화 성공")
+                                else:
+                                    LoggingUtil.warning("StandardTransformer", 
+                                                      f"⚠️  Vector Store 재초기화 실패: _initialized={self.rag_retriever._initialized}")
+                            except Exception as reinit_e:
+                                LoggingUtil.warning("StandardTransformer", 
+                                                  f"⚠️  Vector Store 재초기화 중 오류: {reinit_e}")
+                    
                     # 중복 체크 활성화하여 인덱싱
                     add_success = self.rag_retriever.add_documents(all_documents_to_index, check_duplicates=True)
                     if add_success:

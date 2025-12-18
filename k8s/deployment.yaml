@@ -23,18 +23,36 @@ spec:
         - containerPort: 2024
         env:
         - name: AI_MODEL
-          value: "google_genai:gemini-flash-latest:thinking"
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: AI_MODEL
         - name: AI_MODEL_MAX_INPUT_LIMIT
-          value: "983040"
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: AI_MODEL_MAX_INPUT_LIMIT
         - name: AI_MODEL_MAX_BATCH_SIZE
-          value: "30"
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: AI_MODEL_MAX_BATCH_SIZE
 
         - name: AI_MODEL_LIGHT
-          value: "google_genai:gemini-flash-latest:thinking"
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: AI_MODEL_LIGHT
         - name: AI_MODEL_LIGHT_MAX_INPUT_LIMIT
-          value: "983040"
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: AI_MODEL_LIGHT_MAX_INPUT_LIMIT
         - name: AI_MODEL_LIGHT_MAX_BATCH_SIZE
-          value: "60"
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: AI_MODEL_LIGHT_MAX_BATCH_SIZE
 
         - name: GOOGLE_API_KEY
           valueFrom:
@@ -43,9 +61,15 @@ spec:
               key: GOOGLE_API_KEY
         
         - name: LANGSMITH_TRACING
-          value: "true"
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: LANGSMITH_TRACING
         - name: LANGSMITH_PROJECT
-          value: "msaez-automate-eventstorming-generator"
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: LANGSMITH_PROJECT
         - name: LANGSMITH_API_KEY
           valueFrom:
             secretKeyRef:
@@ -61,10 +85,21 @@ spec:
         - name: FIREBASE_SERVICE_ACCOUNT_PATH
           value: "./.auth/serviceAccountKey.json"
         - name: FIREBASE_DATABASE_URL
-          value: "https://eventstorming-tool-db.firebaseio.com"
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: FIREBASE_DATABASE_URL
+        - name: FIREBASE_STORAGE_BUCKET
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: FIREBASE_STORAGE_BUCKET
         
         - name: NAMESPACE
-          value: "user_story_generator"
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: NAMESPACE
         - name: POD_ID
           valueFrom:
             fieldRef:
@@ -86,7 +121,10 @@ spec:
           value: "1"
 
         - name: LOG_LEVEL
-          value: "INFO"
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: LOG_LEVEL
         
         # 공유 스토리지 경로 설정 (PersistentVolume 마운트 경로)
         - name: SHARED_STORAGE_PATH

@@ -60,7 +60,8 @@ class RAGRetriever:
     def _initialize_vectorstore(self):
         """Vector Store 초기화"""
         try:
-            if Path(self.vectorstore_path).exists():
+            vectorstore_path_obj = Path(self.vectorstore_path)
+            if vectorstore_path_obj.exists():
                 self.vectorstore = Chroma(
                     persist_directory=str(self.vectorstore_path),
                     embedding_function=OpenAIEmbeddings(
@@ -71,7 +72,7 @@ class RAGRetriever:
                 print(f"✅ Vector Store loaded from {self.vectorstore_path}")
             else:
                 # Vector Store가 없으면 생성
-                Path(self.vectorstore_path).mkdir(parents=True, exist_ok=True)
+                vectorstore_path_obj.mkdir(parents=True, exist_ok=True)
                 self.vectorstore = Chroma(
                     persist_directory=str(self.vectorstore_path),
                     embedding_function=OpenAIEmbeddings(
@@ -80,9 +81,19 @@ class RAGRetriever:
                 )
                 self._initialized = True
                 print(f"✅ Vector Store created at {self.vectorstore_path}")
+            
+            # 초기화 후 검증
+            if not self._initialized:
+                print(f"⚠️  Vector Store initialization incomplete: _initialized={self._initialized}")
+                self.vectorstore = None
+            elif not self.vectorstore:
+                print(f"⚠️  Vector Store initialization incomplete: vectorstore is None")
+                self._initialized = False
         except Exception as e:
             print(f"⚠️  Failed to initialize Vector Store: {e}")
             print("   RAG features will work with fallback mode.")
+            self._initialized = False
+            self.vectorstore = None
     
     def clear_vectorstore(self) -> bool:
         """
