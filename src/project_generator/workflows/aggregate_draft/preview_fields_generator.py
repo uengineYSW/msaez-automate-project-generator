@@ -458,17 +458,20 @@ For each field in `previewFields`, include both `fieldName` (English name) and `
     def finalize_output(self, state: PreviewFieldsState) -> PreviewFieldsState:
         """최종 출력 정리"""
         
-        # refs 변환: phrase → index → 원본 라인 (백엔드에서 클램핑 적용)
-        raw_requirements = state.get('originalRequirements', '') or state.get('description', '')
+        # refs 변환: phrase → index → 원본 라인
+        # 프론트엔드와 동일: sanitize/validate는 description 기준, convertToOriginalRefsUsingTraceMap은 traceMap 사용
+        description = state.get('description', '')  # BC description (sanitize/validate용)
+        original_requirements = state.get('originalRequirements', '')  # 원본 요구사항 (최종 검증용)
         line_numbered_requirements = state.get('lineNumberedRequirements', '')
         trace_map = state.get('traceMap', {})
         
         if state.get('aggregateFieldAssignments'):
             self._convert_refs_to_indexes(
                 state['aggregateFieldAssignments'],
-                raw_requirements,
+                description,  # sanitize/validate는 description 기준 (프론트엔드와 동일)
                 line_numbered_requirements,
-                trace_map
+                trace_map,
+                original_requirements  # 최종 검증용
             )
         
         # 검증: 각 aggregate가 최소한의 필드를 가지고 있는지 확인
@@ -571,20 +574,31 @@ For each field in `previewFields`, include both `fieldName` (English name) and `
     def _convert_refs_to_indexes(
         self,
         aggregate_field_assignments: List[Dict],
-        raw_requirements: str,
+        description: str,  # BC description (sanitize/validate용)
         line_numbered_requirements: str,
-        trace_map: Dict
+        trace_map: Dict,
+        original_requirements: str = ''  # 원본 요구사항 (최종 검증용, 선택적)
     ) -> None:
         """refs를 phrase → indexes로 변환 (프론트엔드 RefsTraceUtil과 동일)"""
         from project_generator.workflows.aggregate_draft.traceability_generator import TraceabilityGenerator
         
-        # rawRequirements 디버깅: 길이와 라인 수 확인
-        if not raw_requirements:
+        # 디버깅: 입력 상태 확인
+        LoggingUtil.info("PreviewFieldsGenerator", 
+            f"🔍 [변환 시작] description 길이={len(description) if description else 0}, "
+            f"line_numbered_requirements 길이={len(line_numbered_requirements) if line_numbered_requirements else 0}, "
+            f"trace_map keys={len(trace_map) if isinstance(trace_map, dict) else 0 if trace_map else 0}")
+        
+        if not description:
             LoggingUtil.warning("PreviewFieldsGenerator", 
-                "⚠️ rawRequirements가 비어있습니다! description을 사용합니다.")
+                "⚠️ description이 비어있습니다!")
+        
+        if not line_numbered_requirements:
+            LoggingUtil.error("PreviewFieldsGenerator", 
+                "❌ line_numbered_requirements가 비어있습니다! 변환 불가능합니다.")
+            return
         
         # traceMap 복원 (Firebase가 배열로 변환한 경우 처리)
-        trace_map = self._restore_trace_map(trace_map)
+        restored_trace_map = self._restore_trace_map(trace_map)
         
         # TraceabilityGenerator의 변환 메서드 재사용
         temp_generator = TraceabilityGenerator()
@@ -592,75 +606,122 @@ For each field in `previewFields`, include both `fieldName` (English name) and `
         total_fields = 0
         converted_fields = 0
         failed_fields = 0
+        sanitize_failed = 0
+        validate_failed = 0
+        trace_map_failed = 0
         
-        for assignment in aggregate_field_assignments:
-            for field in assignment.get('previewFields', []):
-                if 'refs' not in field or not field['refs']:
-                    continue
+        from project_generator.utils.refs_trace_util import RefsTraceUtil
+        
+        def convert_field_refs(field, field_type='previewFields'):
+            """단일 필드의 refs 변환 (previewFields와 previewAttributes 공통)"""
+            if 'refs' not in field or not field['refs']:
+                return False
+            
+            nonlocal total_fields, converted_fields, failed_fields, sanitize_failed, validate_failed, trace_map_failed
+            total_fields += 1
+            original_refs = field['refs']
+            
+            # 첫 번째 필드만 상세 로깅
+            is_first = total_fields == 1
+            
+            try:
+                # 1. sanitizeAndConvertRefs: phrase → [[[line, col], [line, col]]]
+                if is_first:
+                    LoggingUtil.info("PreviewFieldsGenerator", 
+                        f"🔍 [sanitize 시도] field='{field.get('fieldName', 'unknown')}', "
+                        f"original_refs={original_refs[:1] if original_refs else []}")
                 
-                total_fields += 1
-                original_refs = field['refs']
+                sanitized_data = RefsTraceUtil.sanitize_and_convert_refs(
+                    {'refs': original_refs},
+                    line_numbered_requirements,
+                    is_use_xml_base=True
+                )
+                sanitized_refs = sanitized_data.get('refs', original_refs) if isinstance(sanitized_data, dict) else sanitized_data
                 
-                try:
-                    # 1. sanitizeAndConvertRefs: phrase → [[[line, col], [line, col]]]
-                    # 공통 유틸리티 사용 (프론트엔드와 동일)
-                    from project_generator.utils.refs_trace_util import RefsTraceUtil
-                    sanitized_data = RefsTraceUtil.sanitize_and_convert_refs(
-                        {'refs': original_refs},
-                        line_numbered_requirements,
-                        is_use_xml_base=True
-                    )
-                    sanitized_refs = sanitized_data.get('refs', original_refs) if isinstance(sanitized_data, dict) else sanitized_data
-                    
-                    if not sanitized_refs:
-                        # 원본 refs 유지 (빈 배열로 덮어쓰지 않음)
-                        failed_fields += 1
-                        continue
-                    
-                    field['refs'] = sanitized_refs
-                    
-                    # 2. validateRefs: 범위 검증
-                    try:
-                        temp_generator._validate_refs(field['refs'], raw_requirements)
-                    except Exception as e:
+                if not sanitized_refs:
+                    if is_first:
                         LoggingUtil.warning("PreviewFieldsGenerator", 
-                            f"Field '{field.get('fieldName', 'unknown')}'의 refs 검증 실패: {str(e)}, sanitized_refs={sanitized_refs}")
-                        # 원본 refs로 복원 (빈 배열로 덮어쓰지 않음)
-                        field['refs'] = original_refs
-                        failed_fields += 1
-                        continue
-                    
-                    # 3. convertToOriginalRefsUsingTraceMap: traceMap 사용해 원본 라인으로 역변환
-                    if trace_map:
-                        # traceMap 복원 확인
-                        if isinstance(trace_map, list):
-                            trace_map = self._restore_trace_map(trace_map)
-                        
-                        # 공통 유틸리티 사용 (프론트엔드와 동일, 클램핑 없음)
-                        converted_refs = RefsTraceUtil.convert_to_original_refs_using_trace_map(
-                            field['refs'],
-                            trace_map
-                        )
-                        
-                        if not converted_refs:
-                            # 변환 실패 시 sanitized_refs 유지 (프론트엔드에서 재변환 시도)
-                            field['refs'] = sanitized_refs
-                            failed_fields += 1
-                        else:
-                            field['refs'] = converted_refs
-                            converted_fields += 1
-                    else:
-                        # trace_map이 없으면 sanitized_refs 그대로 사용
-                        converted_fields += 1
-                            
+                            f"❌ [sanitize 실패] field='{field.get('fieldName', 'unknown')}', "
+                            f"original_refs={original_refs[:1] if original_refs else []}, "
+                            f"sanitized_data={sanitized_data}")
+                    sanitize_failed += 1
+                    failed_fields += 1
+                    return False
+                
+                if is_first:
+                    LoggingUtil.info("PreviewFieldsGenerator", 
+                        f"✅ [sanitize 성공] field='{field.get('fieldName', 'unknown')}', "
+                        f"sanitized_refs={sanitized_refs[:1] if sanitized_refs else []}")
+                
+                field['refs'] = sanitized_refs
+                
+                # 2. validateRefs: 범위 검증 (description 기준, 프론트엔드와 동일)
+                try:
+                    temp_generator._validate_refs(field['refs'], description)
                 except Exception as e:
-                    # 원본 refs 유지 (빈 배열로 덮어쓰지 않음)
+                    if is_first:
+                        LoggingUtil.warning("PreviewFieldsGenerator", 
+                            f"❌ [validate 실패] field='{field.get('fieldName', 'unknown')}', "
+                            f"error={str(e)}, sanitized_refs={sanitized_refs[:1] if sanitized_refs else []}")
+                    validate_failed += 1
+                    # 원본 refs로 복원
                     field['refs'] = original_refs
                     failed_fields += 1
+                    return False
+                
+                # 3. convertToOriginalRefsUsingTraceMap: traceMap 사용해 원본 라인으로 역변환
+                if restored_trace_map:
+                    converted_refs = RefsTraceUtil.convert_to_original_refs_using_trace_map(
+                        field['refs'],
+                        restored_trace_map
+                    )
+                    
+                    if not converted_refs:
+                        if is_first:
+                            LoggingUtil.warning("PreviewFieldsGenerator", 
+                                f"❌ [traceMap 변환 실패] field='{field.get('fieldName', 'unknown')}', "
+                                f"sanitized_refs={sanitized_refs[:1] if sanitized_refs else []}")
+                        trace_map_failed += 1
+                        # 변환 실패 시 sanitized_refs 유지
+                        field['refs'] = sanitized_refs
+                        failed_fields += 1
+                        return False
+                    else:
+                        if is_first:
+                            LoggingUtil.info("PreviewFieldsGenerator", 
+                                f"✅ [변환 완료] field='{field.get('fieldName', 'unknown')}', "
+                                f"converted_refs={converted_refs[:1] if converted_refs else []}")
+                        field['refs'] = converted_refs
+                        converted_fields += 1
+                        return True
+                else:
+                    # trace_map이 없으면 sanitized_refs 그대로 사용
+                    converted_fields += 1
+                    return True
+                    
+            except Exception as e:
+                if is_first:
+                    LoggingUtil.error("PreviewFieldsGenerator", 
+                        f"❌ [예외 발생] field='{field.get('fieldName', 'unknown')}', "
+                        f"error={str(e)}")
+                # 원본 refs 유지
+                field['refs'] = original_refs
+                failed_fields += 1
+                return False
+        
+        for assignment in aggregate_field_assignments:
+            # previewFields 변환
+            for field in assignment.get('previewFields', []):
+                convert_field_refs(field, 'previewFields')
+            
+            # previewAttributes 변환 (previewFields와 동일한 구조)
+            for field in assignment.get('previewAttributes', []):
+                convert_field_refs(field, 'previewAttributes')
         
         if failed_fields > 0:
             LoggingUtil.warning("PreviewFieldsGenerator", 
-                f"Refs 변환: {converted_fields}/{total_fields} 성공, {failed_fields} 실패")
+                f"Refs 변환: {converted_fields}/{total_fields} 성공, {failed_fields} 실패 "
+                f"(sanitize: {sanitize_failed}, validate: {validate_failed}, traceMap: {trace_map_failed})")
     
     # ==================== Workflow Construction ====================
     

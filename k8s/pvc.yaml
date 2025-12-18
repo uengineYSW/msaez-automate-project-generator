@@ -6,11 +6,9 @@ metadata:
     app: project-generator
 spec:
   accessModes:
-    - ReadWriteMany  # 여러 Pod에서 동시 접근 가능
+    - ReadWriteOnce  # standard-rwo StorageClass 호환
   resources:
     requests:
       storage: 10Gi  # 필요에 따라 조정
-  # storageClassName을 명시하지 않으면 기본 StorageClass 사용
-  # 특정 StorageClass를 사용하려면 아래 주석을 해제하고 설정
-  # storageClassName: standard
+  storageClassName: standard-rwo  # GKE 기본 StorageClass
 
