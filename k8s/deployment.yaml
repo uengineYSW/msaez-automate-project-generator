@@ -6,6 +6,11 @@ metadata:
     app: project-generator
 spec:
   replicas: 1  # 각 Pod의 AutoScaler가 관리하므로 초기값을 1로 설정
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0  # 새 Pod를 먼저 생성하지 않음
+      maxUnavailable: 1  # 기존 Pod를 먼저 종료
   selector:
     matchLabels:
       app: project-generator
@@ -32,7 +37,11 @@ spec:
             echo "Setting up permissions..."
             # fsGroup이 자동으로 권한을 설정하지만, 명시적으로도 설정
             chmod -R g+rwX /shared-storage || true
-            echo "Permissions set"
+            # Firebase Storage 다운로드를 위한 디렉토리 미리 생성 및 권한 설정
+            mkdir -p /shared-storage/knowledge_base/company_standards || true
+            chmod -R 777 /shared-storage/knowledge_base/company_standards || true
+            chown -R 1000:1000 /shared-storage/knowledge_base/company_standards || true
+            echo "Permissions set for company_standards directory"
         securityContext:
           runAsUser: 0  # initContainer는 root 권한 필요
         volumeMounts:
@@ -83,10 +92,7 @@ spec:
               key: GOOGLE_API_KEY
         
         - name: LANGSMITH_TRACING
-          valueFrom:
-            secretKeyRef:
-              name: app-secrets
-              key: LANGSMITH_TRACING
+          value: "false"  # LangSmith 추적 비활성화 (사용량 한도 초과 방지)
         - name: LANGSMITH_PROJECT
           valueFrom:
             secretKeyRef:

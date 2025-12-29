@@ -182,20 +182,18 @@ class AggregateDraftStandardTransformer:
             # knowledge_base/company_standards/{user_id}/ 경로에 저장
             user_standards_dir = Config.COMPANY_STANDARDS_PATH / user_id
             
-            # 디렉토리 생성 및 권한 설정 (non-root 사용자를 위한 권한 설정)
-            user_standards_dir.mkdir(parents=True, exist_ok=True)
-            # 디렉토리와 부모 디렉토리들에 쓰기 권한 부여
+            # 디렉토리 생성 (umask를 0으로 설정하여 쓰기 가능한 권한으로 생성)
+            # initContainer에서 이미 부모 디렉토리 권한이 설정되어 있지만, 추가 보장
+            original_umask = os.umask(0)
             try:
-                os.chmod(user_standards_dir, 0o777)
-                # 부모 디렉토리들도 권한 설정
-                parent = user_standards_dir.parent
-                while parent.exists() and parent != Config.COMPANY_STANDARDS_PATH.parent:
-                    os.chmod(parent, 0o777)
-                    parent = parent.parent
-                if Config.COMPANY_STANDARDS_PATH.exists():
-                    os.chmod(Config.COMPANY_STANDARDS_PATH, 0o777)
-            except (OSError, PermissionError) as perm_error:
-                LoggingUtil.warning("StandardTransformer", f"⚠️  디렉토리 권한 설정 실패 (계속 진행): {perm_error}")
+                user_standards_dir.mkdir(parents=True, exist_ok=True)
+                # 생성된 디렉토리에 쓰기 권한 부여 시도 (실패해도 계속 진행)
+                try:
+                    os.chmod(user_standards_dir, 0o777)
+                except (OSError, PermissionError):
+                    pass  # 권한 설정 실패해도 계속 진행 (initContainer에서 이미 설정됨)
+            finally:
+                os.umask(original_umask)
             
             # Firebase Storage에서 파일 목록 조회
             # bucket 이름을 환경 변수에서 가져오거나 명시적으로 지정
@@ -221,14 +219,27 @@ class AggregateDraftStandardTransformer:
                 
                 # 사용자별 디렉토리에 파일 다운로드
                 local_file_path = user_standards_dir / file_name
-                blob.download_to_filename(str(local_file_path))
-                # 다운로드된 파일에 쓰기 권한 부여 (non-root 사용자를 위해)
                 try:
-                    os.chmod(local_file_path, 0o666)
-                except (OSError, PermissionError):
-                    pass  # 권한 설정 실패해도 계속 진행
-                downloaded_files.append(file_name)
-                LoggingUtil.info("StandardTransformer", f"✅ 다운로드 완료: {file_name}")
+                    # 파일 다운로드 전에 디렉토리 권한 확인 및 수정
+                    if not user_standards_dir.exists():
+                        user_standards_dir.mkdir(parents=True, exist_ok=True)
+                    # 디렉토리 쓰기 권한 확인 및 수정 시도
+                    try:
+                        os.chmod(user_standards_dir, 0o777)
+                    except (OSError, PermissionError):
+                        pass  # 권한 설정 실패해도 계속 진행
+                    
+                    blob.download_to_filename(str(local_file_path))
+                    # 다운로드된 파일에 쓰기 권한 부여 (non-root 사용자를 위해)
+                    try:
+                        os.chmod(local_file_path, 0o666)
+                    except (OSError, PermissionError):
+                        pass  # 권한 설정 실패해도 계속 진행
+                    downloaded_files.append(file_name)
+                    LoggingUtil.info("StandardTransformer", f"✅ 다운로드 완료: {file_name}")
+                except (OSError, PermissionError) as e:
+                    LoggingUtil.error("StandardTransformer", f"❌ 파일 다운로드 실패 ({file_name}): {e}")
+                    raise  # 다운로드 실패 시 예외를 다시 발생시켜 상위에서 처리
             
             if downloaded_files:
                 LoggingUtil.info("StandardTransformer", f"📁 사용자 표준 문서 경로: {user_standards_dir}")
