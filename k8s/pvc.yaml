@@ -1,14 +1,14 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: project-generator-storage
+  name: project-generator-pvc
   labels:
     app: project-generator
 spec:
   accessModes:
-    - ReadWriteOnce  # standard-rwo StorageClass 호환
+    - ReadWriteOnce  # standard StorageClass는 ReadWriteOnce만 지원
   resources:
     requests:
-      storage: 10Gi  # 필요에 따라 조정
-  storageClassName: standard-rwo  # GKE 기본 StorageClass
+      storage: 1Gi  # 필요에 따라 조정
+  storageClassName: standard  # GKE 기본 StorageClass
 

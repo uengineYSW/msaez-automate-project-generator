@@ -117,17 +117,6 @@ class Config:
     def get_ai_model_light_max_batch_size() -> int:
         return int(os.getenv('AI_MODEL_LIGHT_MAX_BATCH_SIZE'))
     
-    # RAG 설정
-    VECTORSTORE_PATH = os.getenv('VECTORSTORE_PATH', './knowledge_base/vectorstore')
-    EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'text-embedding-3-small')
-    
-    # 표준 변환 시스템 설정
-    # 임계값 0.8: 행별 청킹 + 핵심 키워드만 포함으로 유사도 향상
-    # 필수 매핑은 전체 표준 원본을 직접 읽어서 global mapping 구성 (유사도 검색과 무관)
-    # 각 행이 독립적으로 임베딩되고 검색 키워드(한글명, 영문명)만 포함
-    # OpenAI 임베딩: "주문" vs "주문 Order" → 90%+ 예상
-    STANDARD_TRANSFORMER_SCORE_THRESHOLD = float(os.getenv('STANDARD_TRANSFORMER_SCORE_THRESHOLD', '0.8'))
-    
     # Knowledge Base 경로 설정
     from pathlib import Path
     # __file__ = backend-generators/src/project_generator/config.py
@@ -141,6 +130,27 @@ class Config:
         _base_path = Path(_shared_storage)
     else:
         _base_path = _project_root
+    
+    # RAG 설정
+    # VECTORSTORE_PATH는 SHARED_STORAGE_PATH가 있으면 그 경로를 사용, 없으면 기본 경로 사용
+    _vectorstore_env = os.getenv('VECTORSTORE_PATH')
+    if _vectorstore_env:
+        VECTORSTORE_PATH = _vectorstore_env
+    elif _shared_storage:
+        # 배포 환경: PVC 경로 사용
+        VECTORSTORE_PATH = str(_base_path / 'knowledge_base' / 'vectorstore')
+    else:
+        # 로컬 환경: 프로젝트 루트 기준 상대 경로
+        VECTORSTORE_PATH = str(_project_root / 'knowledge_base' / 'vectorstore')
+    
+    EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'text-embedding-3-small')
+    
+    # 표준 변환 시스템 설정
+    # 임계값 0.8: 행별 청킹 + 핵심 키워드만 포함으로 유사도 향상
+    # 필수 매핑은 전체 표준 원본을 직접 읽어서 global mapping 구성 (유사도 검색과 무관)
+    # 각 행이 독립적으로 임베딩되고 검색 키워드(한글명, 영문명)만 포함
+    # OpenAI 임베딩: "주문" vs "주문 Order" → 90%+ 예상
+    STANDARD_TRANSFORMER_SCORE_THRESHOLD = float(os.getenv('STANDARD_TRANSFORMER_SCORE_THRESHOLD', '0.8'))
     
     COMPANY_STANDARDS_PATH = _base_path / 'knowledge_base' / 'company_standards'
     

@@ -181,7 +181,21 @@ class AggregateDraftStandardTransformer:
             
             # knowledge_base/company_standards/{user_id}/ 경로에 저장
             user_standards_dir = Config.COMPANY_STANDARDS_PATH / user_id
+            
+            # 디렉토리 생성 및 권한 설정 (non-root 사용자를 위한 권한 설정)
             user_standards_dir.mkdir(parents=True, exist_ok=True)
+            # 디렉토리와 부모 디렉토리들에 쓰기 권한 부여
+            try:
+                os.chmod(user_standards_dir, 0o777)
+                # 부모 디렉토리들도 권한 설정
+                parent = user_standards_dir.parent
+                while parent.exists() and parent != Config.COMPANY_STANDARDS_PATH.parent:
+                    os.chmod(parent, 0o777)
+                    parent = parent.parent
+                if Config.COMPANY_STANDARDS_PATH.exists():
+                    os.chmod(Config.COMPANY_STANDARDS_PATH, 0o777)
+            except (OSError, PermissionError) as perm_error:
+                LoggingUtil.warning("StandardTransformer", f"⚠️  디렉토리 권한 설정 실패 (계속 진행): {perm_error}")
             
             # Firebase Storage에서 파일 목록 조회
             # bucket 이름을 환경 변수에서 가져오거나 명시적으로 지정
@@ -208,6 +222,11 @@ class AggregateDraftStandardTransformer:
                 # 사용자별 디렉토리에 파일 다운로드
                 local_file_path = user_standards_dir / file_name
                 blob.download_to_filename(str(local_file_path))
+                # 다운로드된 파일에 쓰기 권한 부여 (non-root 사용자를 위해)
+                try:
+                    os.chmod(local_file_path, 0o666)
+                except (OSError, PermissionError):
+                    pass  # 권한 설정 실패해도 계속 진행
                 downloaded_files.append(file_name)
                 LoggingUtil.info("StandardTransformer", f"✅ 다운로드 완료: {file_name}")
             
@@ -472,19 +491,30 @@ class AggregateDraftStandardTransformer:
                         AggregateDraftStandardTransformer._vectorstore_cleared_sessions.add(vectorstore_clear_key)
                     elif not clear_success:
                         # Vector Store 클리어 실패 시 ChromaDB 데이터베이스 손상 가능성
-                        # 디렉토리 삭제 후 재생성 시도
-                        import shutil
-                        vectorstore_path = Path(self.rag_retriever.vectorstore_path) if hasattr(self.rag_retriever, 'vectorstore_path') else None
-                        if vectorstore_path and vectorstore_path.exists():
-                            LoggingUtil.warning("StandardTransformer", 
-                                              f"⚠️  Vector Store 클리어 실패: 데이터베이스 손상 가능성. 디렉토리 재생성 시도: {vectorstore_path}")
-                            try:
-                                shutil.rmtree(vectorstore_path)
+                        # RAGRetriever의 복구 메서드 사용
+                        LoggingUtil.warning("StandardTransformer", 
+                                          f"⚠️  Vector Store 클리어 실패: 데이터베이스 손상 가능성. 복구 시도 중...")
+                        try:
+                            # RAGRetriever의 복구 메서드 호출
+                            if hasattr(self.rag_retriever, '_repair_vectorstore'):
+                                repair_success = self.rag_retriever._repair_vectorstore()
+                                if repair_success:
+                                    LoggingUtil.info("StandardTransformer", "✅ Vector Store 복구 및 재초기화 완료")
+                                    if vectorstore_clear_key:
+                                        AggregateDraftStandardTransformer._vectorstore_cleared_sessions.add(vectorstore_clear_key)
+                                else:
+                                    LoggingUtil.warning("StandardTransformer", 
+                                                      f"⚠️  Vector Store 복구 실패: _initialized={self.rag_retriever._initialized}, vectorstore={self.rag_retriever.vectorstore is not None}")
+                            else:
+                                # 구버전 호환성: 수동 복구
+                                import shutil
+                                vectorstore_path = Path(self.rag_retriever.vectorstore_path) if hasattr(self.rag_retriever, 'vectorstore_path') else None
+                                if vectorstore_path and vectorstore_path.exists():
+                                    shutil.rmtree(vectorstore_path)
                                 LoggingUtil.info("StandardTransformer", f"🗑️  손상된 Vector Store 디렉토리 삭제 완료: {vectorstore_path}")
                                 # RAGRetriever 재초기화
                                 from src.project_generator.workflows.common.rag_retriever import RAGRetriever
                                 self.rag_retriever = RAGRetriever(vectorstore_path=str(vectorstore_path))
-                                # 재초기화 후 초기화 상태 확인
                                 if not self.rag_retriever._initialized or not self.rag_retriever.vectorstore:
                                     LoggingUtil.warning("StandardTransformer", 
                                                       f"⚠️  Vector Store 재초기화 실패: _initialized={self.rag_retriever._initialized}, vectorstore={self.rag_retriever.vectorstore is not None}")
@@ -492,8 +522,8 @@ class AggregateDraftStandardTransformer:
                                     LoggingUtil.info("StandardTransformer", "✅ Vector Store 재초기화 완료")
                                 if vectorstore_clear_key:
                                     AggregateDraftStandardTransformer._vectorstore_cleared_sessions.add(vectorstore_clear_key)
-                            except Exception as cleanup_e:
-                                LoggingUtil.warning("StandardTransformer", f"⚠️  Vector Store 디렉토리 삭제 실패: {cleanup_e}")
+                        except Exception as cleanup_e:
+                            LoggingUtil.warning("StandardTransformer", f"⚠️  Vector Store 복구 실패: {cleanup_e}")
                 except Exception as e:
                     LoggingUtil.warning("StandardTransformer", f"⚠️  Vector Store 클리어 실패 (무시하고 계속): {e}")
             
@@ -3400,31 +3430,38 @@ class AggregateDraftStandardTransformer:
                         trans_agg_alias = orig_agg_alias  # orig_item의 alias 사용
                         
                         # 🔒 CRITICAL: original_draft_options에서 원본 refs 복원
-                        original_attrs_refs = {}  # {attr_idx: refs}
+                        # fieldAlias 또는 원본 fieldName을 키로 사용 (인덱스 기반은 LLM이 순서를 바꿀 수 있어 불안정)
+                        original_attrs_refs = {}  # {fieldAlias or fieldName: refs}
                         if original_draft_options and i < len(original_draft_options):
                             original_opt_structure = original_draft_options[i].get("structure", [])
                             for orig_opt_item in original_opt_structure:
                                 if orig_opt_item.get("aggregate", {}).get("alias") == orig_agg_alias:
                                     orig_opt_attrs = orig_opt_item.get("previewAttributes", [])
-                                    for attr_idx, orig_opt_attr in enumerate(orig_opt_attrs):
+                                    for orig_opt_attr in orig_opt_attrs:
                                         if isinstance(orig_opt_attr, dict):
-                                            original_attrs_refs[attr_idx] = orig_opt_attr.get("refs", [])
+                                            # fieldAlias 우선, 없으면 원본 fieldName 사용
+                                            key = orig_opt_attr.get("fieldAlias") or orig_opt_attr.get("fieldName")
+                                            if key:
+                                                original_attrs_refs[key] = orig_opt_attr.get("refs", [])
                                     break
                         
                         if trans_item and trans_attrs:
                             for attr_idx in range(min(len(orig_attrs), len(trans_attrs))):
                                 if isinstance(trans_attrs[attr_idx], dict) and "fieldName" in trans_attrs[attr_idx]:
-                                    orig_field = orig_attrs[attr_idx].get("fieldName") if isinstance(orig_attrs[attr_idx], dict) else None
+                                    orig_attr = orig_attrs[attr_idx] if isinstance(orig_attrs[attr_idx], dict) else None
+                                    if not orig_attr:
+                                        continue
+                                    
+                                    orig_field = orig_attr.get("fieldName")
                                     new_field = trans_attrs[attr_idx]["fieldName"]
                                     
-                                    # 🔒 CRITICAL: 필드명이 변하지 않아도 refs 보존
-                                    orig_attr = orig_attrs[attr_idx] if isinstance(orig_attrs[attr_idx], dict) else None
-                                    if orig_attr:
-                                        # original_draft_options에서 refs 복원 (빈 배열도 보존)
-                                        if attr_idx in original_attrs_refs:
-                                            orig_attr["refs"] = original_attrs_refs[attr_idx]
-                                        elif "refs" not in orig_attr:
-                                            orig_attr["refs"] = []
+                                    # 🔒 CRITICAL: fieldAlias 또는 원본 fieldName으로 refs 매칭 (인덱스 기반은 불안정)
+                                    # fieldAlias 우선 (변환되지 않는 한글 이름), 없으면 원본 fieldName 사용
+                                    match_key = orig_attr.get("fieldAlias") or orig_field
+                                    if match_key and match_key in original_attrs_refs:
+                                        orig_attr["refs"] = original_attrs_refs[match_key]
+                                    elif "refs" not in orig_attr:
+                                        orig_attr["refs"] = []
                                     
                                     if orig_field and orig_field != new_field:
                                         # 🔧 CRITICAL FIX: 선처리 결과를 우선 확인
@@ -3443,29 +3480,33 @@ class AggregateDraftStandardTransformer:
                                         # 선처리 결과가 있으면 우선 적용 (LLM 결과 무시)
                                         if preprocessed_field and original_field_name:
                                             # 선처리 결과 유지 (이미 orig_field에 적용되어 있음)
-                                            # 🔒 CRITICAL: refs 보존 (빈 배열도 보존)
+                                            # 🔒 CRITICAL: refs 보존 (fieldAlias/fieldName 기반 매칭)
                                             orig_attr = orig_attrs[attr_idx]
                                             if isinstance(orig_attr, dict):
-                                                # original_draft_options에서 refs 복원 (빈 배열도 보존)
-                                                if attr_idx in original_attrs_refs:
-                                                    orig_attr["refs"] = original_attrs_refs[attr_idx]
+                                                match_key = orig_attr.get("fieldAlias") or original_field_name
+                                                if match_key and match_key in original_attrs_refs:
+                                                    orig_attr["refs"] = original_attrs_refs[match_key]
                                                 elif "refs" not in orig_attr:
                                                     orig_attr["refs"] = []
                                             # 로그 간소화: 선처리우선 로그 제거
                                             pass
                                         elif orig_field != new_field:
                                             # 선처리 결과가 없을 때만 LLM 결과 사용
-                                            # 🔒 CRITICAL: refs 보존 (빈 배열도 보존)
+                                            # 🔒 CRITICAL: refs 보존 (fieldAlias/fieldName 기반 매칭)
                                             orig_attr = orig_attrs[attr_idx]
                                             if isinstance(orig_attr, dict):
                                                 orig_attr["fieldName"] = new_field
-                                                # original_draft_options에서 refs 복원 (빈 배열도 보존)
-                                                if attr_idx in original_attrs_refs:
-                                                    orig_attr["refs"] = original_attrs_refs[attr_idx]
+                                                # fieldAlias 또는 원본 fieldName으로 매칭
+                                                match_key = orig_attr.get("fieldAlias") or orig_field
+                                                if match_key and match_key in original_attrs_refs:
+                                                    orig_attr["refs"] = original_attrs_refs[match_key]
                                                 elif "refs" not in orig_attr:
                                                     orig_attr["refs"] = []
                                             else:
-                                                orig_attrs[attr_idx] = {"fieldName": new_field, "refs": original_attrs_refs.get(attr_idx, [])}
+                                                # 새로 생성하는 경우도 fieldAlias/fieldName 기반으로 refs 찾기
+                                                match_key = orig_field
+                                                refs = original_attrs_refs.get(match_key, []) if match_key else []
+                                                orig_attrs[attr_idx] = {"fieldName": new_field, "refs": refs}
                                             # 로그 간소화: LLM변환 로그 제거
                         elif not trans_item or not trans_attrs:
                             # LLM 결과가 없거나 trans_attrs가 비어있으면 선처리 결과 확인
@@ -3476,27 +3517,30 @@ class AggregateDraftStandardTransformer:
                                     curr_alias = curr_item.get("aggregate", {}).get("alias")
                                     if curr_alias == orig_agg_alias:
                                         curr_attrs = curr_item.get("previewAttributes", [])
-                                        # 🔒 CRITICAL: original_draft_options에서 원본 refs 복원
-                                        original_attrs_refs = {}  # {attr_idx: refs}
+                                        # 🔒 CRITICAL: original_draft_options에서 원본 refs 복원 (fieldAlias/fieldName 기반)
+                                        original_attrs_refs = {}  # {fieldAlias or fieldName: refs}
                                         if original_draft_options and i < len(original_draft_options):
                                             original_opt_structure = original_draft_options[i].get("structure", [])
                                             for orig_opt_item in original_opt_structure:
                                                 if orig_opt_item.get("aggregate", {}).get("alias") == orig_agg_alias:
                                                     orig_opt_attrs = orig_opt_item.get("previewAttributes", [])
-                                                    for attr_idx, orig_opt_attr in enumerate(orig_opt_attrs):
+                                                    for orig_opt_attr in orig_opt_attrs:
                                                         if isinstance(orig_opt_attr, dict):
-                                                            original_attrs_refs[attr_idx] = orig_opt_attr.get("refs", [])
+                                                            key = orig_opt_attr.get("fieldAlias") or orig_opt_attr.get("fieldName")
+                                                            if key:
+                                                                original_attrs_refs[key] = orig_opt_attr.get("refs", [])
                                                     break
                                         # 선처리된 필드명 적용
                                         for attr_idx in range(min(len(orig_attrs), len(curr_attrs))):
                                             if isinstance(orig_attrs[attr_idx], dict) and isinstance(curr_attrs[attr_idx], dict):
-                                                orig_field = orig_attrs[attr_idx].get("fieldName")
+                                                orig_attr = orig_attrs[attr_idx]
+                                                orig_field = orig_attr.get("fieldName")
                                                 curr_field = curr_attrs[attr_idx].get("fieldName")
                                                 
-                                                # 🔒 CRITICAL: 필드명이 변하지 않아도 refs 보존
-                                                orig_attr = orig_attrs[attr_idx]
-                                                if attr_idx in original_attrs_refs:
-                                                    orig_attr["refs"] = original_attrs_refs[attr_idx]
+                                                # 🔒 CRITICAL: fieldAlias 또는 원본 fieldName으로 refs 매칭
+                                                match_key = orig_attr.get("fieldAlias") or orig_field
+                                                if match_key and match_key in original_attrs_refs:
+                                                    orig_attr["refs"] = original_attrs_refs[match_key]
                                                 elif "refs" not in orig_attr:
                                                     orig_attr["refs"] = []
                                                 
@@ -3511,31 +3555,38 @@ class AggregateDraftStandardTransformer:
                         trans_ddl_fields = trans_item.get("ddlFields", []) if trans_item else []
                         
                         # 🔒 CRITICAL: original_draft_options에서 원본 ddlFields refs 복원
-                        original_ddl_fields_refs = {}  # {ddl_idx: refs}
+                        # fieldAlias 또는 원본 fieldName을 키로 사용 (인덱스 기반은 LLM이 순서를 바꿀 수 있어 불안정)
+                        original_ddl_fields_refs = {}  # {fieldAlias or fieldName: refs}
                         if original_draft_options and i < len(original_draft_options):
                             original_opt_structure = original_draft_options[i].get("structure", [])
                             for orig_opt_item in original_opt_structure:
                                 if orig_opt_item.get("aggregate", {}).get("alias") == orig_agg_alias:
                                     orig_opt_ddl_fields = orig_opt_item.get("ddlFields", [])
-                                    for ddl_idx, orig_opt_ddl_field in enumerate(orig_opt_ddl_fields):
+                                    for orig_opt_ddl_field in orig_opt_ddl_fields:
                                         if isinstance(orig_opt_ddl_field, dict):
-                                            original_ddl_fields_refs[ddl_idx] = orig_opt_ddl_field.get("refs", [])
+                                            # fieldAlias 우선, 없으면 원본 fieldName 사용
+                                            key = orig_opt_ddl_field.get("fieldAlias") or orig_opt_ddl_field.get("fieldName")
+                                            if key:
+                                                original_ddl_fields_refs[key] = orig_opt_ddl_field.get("refs", [])
                                     break
                         
                         if trans_item and trans_ddl_fields:
                             for ddl_idx in range(min(len(orig_ddl_fields), len(trans_ddl_fields))):
                                 if isinstance(trans_ddl_fields[ddl_idx], dict) and "fieldName" in trans_ddl_fields[ddl_idx]:
-                                    orig_ddl_field = orig_ddl_fields[ddl_idx].get("fieldName") if isinstance(orig_ddl_fields[ddl_idx], dict) else None
+                                    orig_ddl_attr = orig_ddl_fields[ddl_idx] if isinstance(orig_ddl_fields[ddl_idx], dict) else None
+                                    if not orig_ddl_attr:
+                                        continue
+                                    
+                                    orig_ddl_field = orig_ddl_attr.get("fieldName")
                                     new_ddl_field = trans_ddl_fields[ddl_idx]["fieldName"]
                                     
-                                    # 🔒 CRITICAL: 필드명이 변하지 않아도 refs 보존
-                                    orig_ddl_attr = orig_ddl_fields[ddl_idx] if isinstance(orig_ddl_fields[ddl_idx], dict) else None
-                                    if orig_ddl_attr:
-                                        # original_draft_options에서 refs 복원 (빈 배열도 보존)
-                                        if ddl_idx in original_ddl_fields_refs:
-                                            orig_ddl_attr["refs"] = original_ddl_fields_refs[ddl_idx]
-                                        elif "refs" not in orig_ddl_attr:
-                                            orig_ddl_attr["refs"] = []
+                                    # 🔒 CRITICAL: fieldAlias 또는 원본 fieldName으로 refs 매칭 (인덱스 기반은 불안정)
+                                    # fieldAlias 우선 (변환되지 않는 한글 이름), 없으면 원본 fieldName 사용
+                                    match_key = orig_ddl_attr.get("fieldAlias") or orig_ddl_field
+                                    if match_key and match_key in original_ddl_fields_refs:
+                                        orig_ddl_attr["refs"] = original_ddl_fields_refs[match_key]
+                                    elif "refs" not in orig_ddl_attr:
+                                        orig_ddl_attr["refs"] = []
                                     
                                     if orig_ddl_field and orig_ddl_field != new_ddl_field:
                                         # 🔧 CRITICAL FIX: 선처리 결과를 우선 확인
@@ -3554,29 +3605,33 @@ class AggregateDraftStandardTransformer:
                                         # 선처리 결과가 있으면 우선 적용 (LLM 결과 무시)
                                         if preprocessed_field and original_field_name:
                                             # 선처리 결과 유지 (이미 orig_ddl_field에 적용되어 있음)
-                                            # 🔒 CRITICAL: refs 보존 (빈 배열도 보존)
+                                            # 🔒 CRITICAL: refs 보존 (fieldAlias/fieldName 기반 매칭)
                                             orig_ddl_attr = orig_ddl_fields[ddl_idx]
                                             if isinstance(orig_ddl_attr, dict):
-                                                # original_draft_options에서 refs 복원 (빈 배열도 보존)
-                                                if ddl_idx in original_ddl_fields_refs:
-                                                    orig_ddl_attr["refs"] = original_ddl_fields_refs[ddl_idx]
+                                                match_key = orig_ddl_attr.get("fieldAlias") or original_field_name
+                                                if match_key and match_key in original_ddl_fields_refs:
+                                                    orig_ddl_attr["refs"] = original_ddl_fields_refs[match_key]
                                                 elif "refs" not in orig_ddl_attr:
                                                     orig_ddl_attr["refs"] = []
                                             # 로그 간소화: 선처리우선 로그 제거
                                             pass
                                         elif orig_ddl_field != new_ddl_field:
                                             # 선처리 결과가 없을 때만 LLM 결과 사용
-                                            # 🔒 CRITICAL: refs 보존 (빈 배열도 보존)
+                                            # 🔒 CRITICAL: refs 보존 (fieldAlias/fieldName 기반 매칭)
                                             orig_ddl_attr = orig_ddl_fields[ddl_idx]
                                             if isinstance(orig_ddl_attr, dict):
                                                 orig_ddl_attr["fieldName"] = new_ddl_field
-                                                # original_draft_options에서 refs 복원 (빈 배열도 보존)
-                                                if ddl_idx in original_ddl_fields_refs:
-                                                    orig_ddl_attr["refs"] = original_ddl_fields_refs[ddl_idx]
+                                                # fieldAlias 또는 원본 fieldName으로 매칭
+                                                match_key = orig_ddl_attr.get("fieldAlias") or orig_ddl_field
+                                                if match_key and match_key in original_ddl_fields_refs:
+                                                    orig_ddl_attr["refs"] = original_ddl_fields_refs[match_key]
                                                 elif "refs" not in orig_ddl_attr:
                                                     orig_ddl_attr["refs"] = []
                                             else:
-                                                orig_ddl_fields[ddl_idx] = {"fieldName": new_ddl_field, "refs": original_ddl_fields_refs.get(ddl_idx, [])}
+                                                # 새로 생성하는 경우도 fieldAlias/fieldName 기반으로 refs 찾기
+                                                match_key = orig_ddl_field
+                                                refs = original_ddl_fields_refs.get(match_key, []) if match_key else []
+                                                orig_ddl_fields[ddl_idx] = {"fieldName": new_ddl_field, "refs": refs}
                                             # 로그 간소화: LLM변환 로그 제거
                         elif not trans_item or not trans_ddl_fields:
                             # LLM 결과가 없거나 trans_ddl_fields가 비어있으면 선처리 결과 확인
@@ -3587,16 +3642,30 @@ class AggregateDraftStandardTransformer:
                                     curr_alias = curr_item.get("aggregate", {}).get("alias")
                                     if curr_alias == orig_agg_alias:
                                         curr_ddl_fields = curr_item.get("ddlFields", [])
+                                        # 🔒 CRITICAL: original_draft_options에서 원본 ddlFields refs 복원 (fieldAlias/fieldName 기반)
+                                        original_ddl_fields_refs = {}  # {fieldAlias or fieldName: refs}
+                                        if original_draft_options and i < len(original_draft_options):
+                                            original_opt_structure = original_draft_options[i].get("structure", [])
+                                            for orig_opt_item in original_opt_structure:
+                                                if orig_opt_item.get("aggregate", {}).get("alias") == orig_agg_alias:
+                                                    orig_opt_ddl_fields = orig_opt_item.get("ddlFields", [])
+                                                    for orig_opt_ddl_field in orig_opt_ddl_fields:
+                                                        if isinstance(orig_opt_ddl_field, dict):
+                                                            key = orig_opt_ddl_field.get("fieldAlias") or orig_opt_ddl_field.get("fieldName")
+                                                            if key:
+                                                                original_ddl_fields_refs[key] = orig_opt_ddl_field.get("refs", [])
+                                                    break
                                         # 선처리된 필드명 적용
                                         for ddl_idx in range(min(len(orig_ddl_fields), len(curr_ddl_fields))):
                                             if isinstance(orig_ddl_fields[ddl_idx], dict) and isinstance(curr_ddl_fields[ddl_idx], dict):
-                                                orig_field = orig_ddl_fields[ddl_idx].get("fieldName")
+                                                orig_ddl_attr = orig_ddl_fields[ddl_idx]
+                                                orig_field = orig_ddl_attr.get("fieldName")
                                                 curr_field = curr_ddl_fields[ddl_idx].get("fieldName")
                                                 
-                                                # 🔒 CRITICAL: 필드명이 변하지 않아도 refs 보존
-                                                orig_ddl_attr = orig_ddl_fields[ddl_idx]
-                                                if ddl_idx in original_ddl_fields_refs:
-                                                    orig_ddl_attr["refs"] = original_ddl_fields_refs[ddl_idx]
+                                                # 🔒 CRITICAL: fieldAlias 또는 원본 fieldName으로 refs 매칭
+                                                match_key = orig_ddl_attr.get("fieldAlias") or orig_field
+                                                if match_key and match_key in original_ddl_fields_refs:
+                                                    orig_ddl_attr["refs"] = original_ddl_fields_refs[match_key]
                                                 elif "refs" not in orig_ddl_attr:
                                                     orig_ddl_attr["refs"] = []
                                                 
@@ -5361,35 +5430,45 @@ If no match or inappropriate match is found, keep the original unchanged.
                 LoggingUtil.warning("StandardTransformer", 
                                   f"⚠️  [청킹] valueObjects 병합 실패: 원본 {len(value_objects)}개, 변환 {len(transformed_vos)}개")
         
-        # previewAttributes 병합 (인덱스 기반 - refs 복원)
+        # previewAttributes 병합 (fieldAlias 기반 매칭 - 인덱스 기반은 LLM이 순서를 바꿀 수 있어 불안정)
         if transformed_preview_attrs and len(transformed_preview_attrs) == len(preview_attrs):
-            # 변환된 필드가 원본과 같은 수이면 순서대로 병합
+            # 원본 필드를 fieldAlias로 인덱싱 (fieldAlias는 변환되지 않으므로 안전한 키)
+            original_attrs_by_alias = {}  # {fieldAlias: original_attr}
+            for orig_attr in original_preview_attrs:
+                if isinstance(orig_attr, dict):
+                    field_alias = orig_attr.get("fieldAlias")
+                    if field_alias:
+                        original_attrs_by_alias[field_alias] = orig_attr
+            
+            # 변환된 필드를 fieldAlias로 매칭하여 병합
             merged_preview_attrs = []
-            for i in range(len(transformed_preview_attrs)):
-                transformed_attr = transformed_preview_attrs[i]
-                # 🔒 CRITICAL: original_structure_item에서 원본 attr 가져오기 (refs 포함, 빈 배열도 보존)
-                if i < len(original_preview_attrs):
-                    original_attr = original_preview_attrs[i]
-                    if isinstance(transformed_attr, dict) and isinstance(original_attr, dict):
-                        merged_attr = copy.deepcopy(original_attr)
-                        merged_attr["fieldName"] = transformed_attr.get("fieldName", original_attr.get("fieldName"))
-                        # 🔒 CRITICAL: refs 명시적으로 보존 (빈 배열도 보존)
-                        if "refs" not in merged_attr:
-                            merged_attr["refs"] = original_attr.get("refs", [])
+            for transformed_attr in transformed_preview_attrs:
+                if isinstance(transformed_attr, dict):
+                    trans_field_name = transformed_attr.get("fieldName")
+                    trans_field_alias = transformed_attr.get("fieldAlias")
+                    
+                    # fieldAlias로 매칭 시도 (가장 안전 - 변환되지 않음)
+                    matched_original = None
+                    if trans_field_alias and trans_field_alias in original_attrs_by_alias:
+                        matched_original = original_attrs_by_alias[trans_field_alias]
+                    elif len(merged_preview_attrs) < len(original_preview_attrs):
+                        # fieldAlias 매칭 실패 시 인덱스 기반 fallback (순서가 같다고 가정)
+                        idx = len(merged_preview_attrs)
+                        if idx < len(original_preview_attrs):
+                            candidate = original_preview_attrs[idx]
+                            if isinstance(candidate, dict):
+                                # 원본의 fieldAlias가 transformed_attr의 fieldAlias와 일치하는지 확인
+                                orig_field_alias = candidate.get("fieldAlias")
+                                if not trans_field_alias or orig_field_alias == trans_field_alias:
+                                    matched_original = candidate
+                    
+                    # 매칭된 원본이 있으면 복사하고 fieldName만 업데이트
+                    if matched_original:
+                        merged_attr = copy.deepcopy(matched_original)
+                        merged_attr["fieldName"] = trans_field_name
                         merged_preview_attrs.append(merged_attr)
                     else:
-                        merged_preview_attrs.append(transformed_attr)
-                elif i < len(preview_attrs):
-                    # original_structure_item이 없으면 현재 preview_attrs 사용
-                    original_attr = preview_attrs[i]
-                    if isinstance(transformed_attr, dict) and isinstance(original_attr, dict):
-                        merged_attr = copy.deepcopy(original_attr)
-                        merged_attr["fieldName"] = transformed_attr.get("fieldName", original_attr.get("fieldName"))
-                        # 🔒 CRITICAL: refs 명시적으로 보존 (빈 배열도 보존)
-                        if "refs" not in merged_attr:
-                            merged_attr["refs"] = original_attr.get("refs", [])
-                        merged_preview_attrs.append(merged_attr)
-                    else:
+                        # 매칭 실패 시 transformed_attr 그대로 사용 (refs는 원본에서 복원 불가)
                         merged_preview_attrs.append(transformed_attr)
                 else:
                     merged_preview_attrs.append(transformed_attr)
@@ -5404,35 +5483,45 @@ If no match or inappropriate match is found, keep the original unchanged.
                 LoggingUtil.warning("StandardTransformer", 
                                   f"⚠️  [청킹] previewAttributes 병합 실패: 원본 {len(preview_attrs)}개, 변환 {len(transformed_preview_attrs)}개")
         
-        # ddlFields 병합 (인덱스 기반 - refs 복원)
+        # ddlFields 병합 (fieldAlias 기반 매칭 - 인덱스 기반은 LLM이 순서를 바꿀 수 있어 불안정)
         if transformed_ddl_fields and len(transformed_ddl_fields) == len(ddl_fields):
-            # 변환된 필드가 원본과 같은 수이면 순서대로 병합
+            # 원본 필드를 fieldAlias로 인덱싱 (fieldAlias는 변환되지 않으므로 안전한 키)
+            original_ddl_by_alias = {}  # {fieldAlias: original_field}
+            for orig_field in original_ddl_fields:
+                if isinstance(orig_field, dict):
+                    field_alias = orig_field.get("fieldAlias")
+                    if field_alias:
+                        original_ddl_by_alias[field_alias] = orig_field
+            
+            # 변환된 필드를 fieldAlias로 매칭하여 병합
             merged_ddl_fields = []
-            for i in range(len(transformed_ddl_fields)):
-                transformed_field = transformed_ddl_fields[i]
-                # 🔒 CRITICAL: original_structure_item에서 원본 field 가져오기 (refs 포함, 빈 배열도 보존)
-                if i < len(original_ddl_fields):
-                    original_field = original_ddl_fields[i]
-                    if isinstance(transformed_field, dict) and isinstance(original_field, dict):
-                        merged_field = copy.deepcopy(original_field)
-                        merged_field["fieldName"] = transformed_field.get("fieldName", original_field.get("fieldName"))
-                        # 🔒 CRITICAL: refs 명시적으로 보존 (빈 배열도 보존)
-                        if "refs" not in merged_field:
-                            merged_field["refs"] = original_field.get("refs", [])
+            for transformed_field in transformed_ddl_fields:
+                if isinstance(transformed_field, dict):
+                    trans_field_name = transformed_field.get("fieldName")
+                    trans_field_alias = transformed_field.get("fieldAlias")
+                    
+                    # fieldAlias로 매칭 시도 (가장 안전 - 변환되지 않음)
+                    matched_original = None
+                    if trans_field_alias and trans_field_alias in original_ddl_by_alias:
+                        matched_original = original_ddl_by_alias[trans_field_alias]
+                    elif len(merged_ddl_fields) < len(original_ddl_fields):
+                        # fieldAlias 매칭 실패 시 인덱스 기반 fallback (순서가 같다고 가정)
+                        idx = len(merged_ddl_fields)
+                        if idx < len(original_ddl_fields):
+                            candidate = original_ddl_fields[idx]
+                            if isinstance(candidate, dict):
+                                # 원본의 fieldAlias가 transformed_field의 fieldAlias와 일치하는지 확인
+                                orig_field_alias = candidate.get("fieldAlias")
+                                if not trans_field_alias or orig_field_alias == trans_field_alias:
+                                    matched_original = candidate
+                    
+                    # 매칭된 원본이 있으면 복사하고 fieldName만 업데이트
+                    if matched_original:
+                        merged_field = copy.deepcopy(matched_original)
+                        merged_field["fieldName"] = trans_field_name
                         merged_ddl_fields.append(merged_field)
                     else:
-                        merged_ddl_fields.append(transformed_field)
-                elif i < len(ddl_fields):
-                    # original_structure_item이 없으면 현재 ddl_fields 사용
-                    original_field = ddl_fields[i]
-                    if isinstance(transformed_field, dict) and isinstance(original_field, dict):
-                        merged_field = copy.deepcopy(original_field)
-                        merged_field["fieldName"] = transformed_field.get("fieldName", original_field.get("fieldName"))
-                        # 🔒 CRITICAL: refs 명시적으로 보존 (빈 배열도 보존)
-                        if "refs" not in merged_field:
-                            merged_field["refs"] = original_field.get("refs", [])
-                        merged_ddl_fields.append(merged_field)
-                    else:
+                        # 매칭 실패 시 transformed_field 그대로 사용 (refs는 원본에서 복원 불가)
                         merged_ddl_fields.append(transformed_field)
                 else:
                     merged_ddl_fields.append(transformed_field)

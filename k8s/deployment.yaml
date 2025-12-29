@@ -16,6 +16,28 @@ spec:
     spec:
       serviceAccountName: project-generator
       terminationGracePeriodSeconds: 7200  # 2시간 (작업 완료를 위한 충분한 시간)
+      securityContext:
+        # non-root 사용자로 실행 (보안 강화)
+        # fsGroup은 볼륨 마운트된 디렉토리에 그룹 쓰기 권한을 부여
+        fsGroup: 1000
+        fsGroupChangePolicy: "OnRootMismatch"  # 성능/안정성 향상: 매번 재귀 변경하지 않음
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+      - name: fix-permissions
+        image: busybox:latest
+        command: ['sh', '-c']
+        args:
+          - |
+            echo "Setting up permissions..."
+            # fsGroup이 자동으로 권한을 설정하지만, 명시적으로도 설정
+            chmod -R g+rwX /shared-storage || true
+            echo "Permissions set"
+        securityContext:
+          runAsUser: 0  # initContainer는 root 권한 필요
+        volumeMounts:
+        - name: shared-storage-volume
+          mountPath: /shared-storage
       containers:
       - name: project-generator
         image: asia-northeast3-docker.pkg.dev/eventstorming-tool-db/eventstorming-repo/project-generator:latest
@@ -106,6 +128,12 @@ spec:
               fieldPath: metadata.name
         - name: IS_LOCAL_RUN
           value: "false"
+        - name: HOME
+          value: "/tmp"
+        - name: UV_CACHE_DIR
+          value: "/tmp/.cache/uv"
+        - name: UV_BUILD_DIR
+          value: "/tmp/.cache/uv/builds"
 
         - name: AUTO_SCALE_NAMESPACE
           value: "default"
@@ -147,21 +175,21 @@ spec:
           httpGet:
             path: /ok
             port: 2024
-          initialDelaySeconds: 30
+          initialDelaySeconds: 60
           periodSeconds: 10
         readinessProbe:
           httpGet:
             path: /ok
             port: 2024
-          initialDelaySeconds: 5
-          periodSeconds: 5
+          initialDelaySeconds: 60
+          periodSeconds: 60
       volumes:
       - name: firebase-key-volume
         secret:
           secretName: firebase-key
       - name: shared-storage-volume
         persistentVolumeClaim:
-          claimName: project-generator-storage
+          claimName: project-generator-pvc
 ---
 apiVersion: v1
 kind: Service
