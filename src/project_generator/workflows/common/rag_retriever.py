@@ -335,12 +335,31 @@ class RAGRetriever:
                     try:
                         # 컬렉션 목록 조회로 데이터베이스 접근 테스트
                         _ = self.vectorstore._collection
-                        self._initialized = True
-                        print(f"✅ Vector Store loaded from {self.vectorstore_path}")
+                        # collection이 실제로 존재하는지 확인 (검색 테스트)
+                        try:
+                            # 간단한 검색으로 collection 존재 여부 확인
+                            test_results = self.vectorstore.similarity_search_with_score("test", k=1)
+                            self._initialized = True
+                            print(f"✅ Vector Store loaded from {self.vectorstore_path}")
+                        except Exception as search_test_error:
+                            # 검색 실패 시 collection이 없거나 손상된 것으로 간주
+                            error_msg = str(search_test_error).lower()
+                            if "no such table" in error_msg or "collections" in error_msg or "database" in error_msg:
+                                print(f"⚠️  Vector Store collection missing or corrupted: {search_test_error}")
+                                print(f"   Attempting to repair by recreating the database...")
+                                # 손상된 데이터베이스 복구 시도
+                                if self._repair_vectorstore():
+                                    print(f"✅ Vector Store repaired and reinitialized")
+                                else:
+                                    raise search_test_error
+                            else:
+                                # 다른 오류는 무시하고 계속 진행 (빈 collection일 수 있음)
+                                self._initialized = True
+                                print(f"✅ Vector Store loaded from {self.vectorstore_path} (collection may be empty)")
                     except Exception as verify_error:
                         # 데이터베이스 손상 감지 (예: tenants 테이블 없음)
                         error_msg = str(verify_error).lower()
-                        if "tenants" in error_msg or "no such table" in error_msg or "database" in error_msg:
+                        if "tenants" in error_msg or "no such table" in error_msg or "database" in error_msg or "collections" in error_msg:
                             print(f"⚠️  Vector Store database corrupted: {verify_error}")
                             print(f"   Attempting to repair by recreating the database...")
                             # 손상된 데이터베이스 복구 시도
@@ -1640,19 +1659,69 @@ class RAGRetriever:
             except Exception as filter_error:
                 # 필터 오류 시 필터 없이 검색 후 수동 필터링
                 # ChromaDB 동시성 문제("Failed to get segments")는 일시적이므로 조용히 처리
-                error_msg = str(filter_error)
+                error_msg = str(filter_error).lower()
                 if "Failed to get segments" not in error_msg:
                     print(f"⚠️  Search failed with filter: {filter_error}")
-                all_results = self.vectorstore.similarity_search_with_score(
-                    query,
-                    k=k * 5  # 더 많이 가져와서 필터링
-                )
-                # 수동 필터링
-                results_with_scores = []
-                for doc, score in all_results:
-                    doc_type = doc.metadata.get("type", "")
-                    if doc_type in ["database_standard", "api_standard", "terminology_standard"]:
-                        results_with_scores.append((doc, score))
+                # "no such table: collections" 오류 감지 시 자동 복구 시도
+                if "no such table" in error_msg or "collections" in error_msg or "database" in error_msg:
+                    print(f"⚠️  Vector Store database corrupted during search. Attempting to repair...")
+                    if self._repair_vectorstore():
+                        print(f"✅ Vector Store repaired. Retrying search...")
+                        # 복구 후 재시도
+                        try:
+                            all_results = self.vectorstore.similarity_search_with_score(
+                                query,
+                                k=k * 5  # 더 많이 가져와서 필터링
+                            )
+                            # 수동 필터링
+                            results_with_scores = []
+                            for doc, score in all_results:
+                                doc_type = doc.metadata.get("type", "")
+                                if doc_type in ["database_standard", "api_standard", "terminology_standard"]:
+                                    results_with_scores.append((doc, score))
+                        except Exception as retry_error:
+                            print(f"⚠️  Search still failed after repair: {retry_error}")
+                            return self._fallback_search_company_standards(query, k)
+                    else:
+                        print(f"⚠️  Vector Store repair failed. Using fallback search.")
+                        return self._fallback_search_company_standards(query, k)
+                else:
+                    try:
+                        all_results = self.vectorstore.similarity_search_with_score(
+                            query,
+                            k=k * 5  # 더 많이 가져와서 필터링
+                        )
+                        # 수동 필터링
+                        results_with_scores = []
+                        for doc, score in all_results:
+                            doc_type = doc.metadata.get("type", "")
+                            if doc_type in ["database_standard", "api_standard", "terminology_standard"]:
+                                results_with_scores.append((doc, score))
+                    except Exception as search_error:
+                        error_msg2 = str(search_error).lower()
+                        if "no such table" in error_msg2 or "collections" in error_msg2 or "database" in error_msg2:
+                            print(f"⚠️  Vector Store database corrupted during search. Attempting to repair...")
+                            if self._repair_vectorstore():
+                                print(f"✅ Vector Store repaired. Retrying search...")
+                                # 복구 후 재시도
+                                try:
+                                    all_results = self.vectorstore.similarity_search_with_score(
+                                        query,
+                                        k=k * 5
+                                    )
+                                    results_with_scores = []
+                                    for doc, score in all_results:
+                                        doc_type = doc.metadata.get("type", "")
+                                        if doc_type in ["database_standard", "api_standard", "terminology_standard"]:
+                                            results_with_scores.append((doc, score))
+                                except Exception as retry_error2:
+                                    print(f"⚠️  Search still failed after repair: {retry_error2}")
+                                    return self._fallback_search_company_standards(query, k)
+                            else:
+                                return self._fallback_search_company_standards(query, k)
+                        else:
+                            print(f"⚠️  Search failed: {search_error}")
+                            return self._fallback_search_company_standards(query, k)
             # 점수 필터링
             # ChromaDB의 similarity_search_with_score는 거리(distance)를 반환
             # ChromaDB는 기본적으로 코사인 거리(cosine distance)를 사용

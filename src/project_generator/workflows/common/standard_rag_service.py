@@ -185,10 +185,39 @@ class StandardRAGService:
                         filtered_results.append((doc, score))
                     results_with_scores = filtered_results
             except Exception as e2:
-                error_msg2 = str(e2)
+                error_msg2 = str(e2).lower()
                 if "Failed to get segments" not in error_msg2:
                     print(f"⚠️  Search failed: {e2}")
-                return []
+                # "no such table: collections" 오류 감지 시 자동 복구 시도
+                if "no such table" in error_msg2 or "collections" in error_msg2 or "database" in error_msg2:
+                    print(f"⚠️  Vector Store database corrupted during search. Attempting to repair...")
+                    try:
+                        if self.retriever._repair_vectorstore():
+                            print(f"✅ Vector Store repaired. Retrying search...")
+                            # 복구 후 재시도 (1회만)
+                            try:
+                                results_with_scores = vs.similarity_search_with_score(query, k=search_k)
+                                if transformation_session_id:
+                                    filtered_results = []
+                                    for doc, score in results_with_scores:
+                                        doc_metadata = doc.metadata
+                                        has_draft_context = doc_metadata.get("has_draft_context", False)
+                                        if has_draft_context:
+                                            if doc_metadata.get("transformation_session_id") != transformation_session_id:
+                                                continue
+                                        filtered_results.append((doc, score))
+                                    results_with_scores = filtered_results
+                            except Exception as retry_error:
+                                print(f"⚠️  Search still failed after repair: {retry_error}")
+                                return []
+                        else:
+                            print(f"⚠️  Vector Store repair failed. Returning empty results.")
+                            return []
+                    except Exception as repair_error:
+                        print(f"⚠️  Failed to repair Vector Store: {repair_error}")
+                        return []
+                else:
+                    return []
         
         candidates: List[StandardSearchResult] = []
         filtered_count = 0  # 필터링된 결과 수 추적
