@@ -7,7 +7,7 @@ from typing import Optional, List, Tuple
 
 from kubernetes import client, config
 
-from ..systems import FirebaseSystem
+from ..systems.storage_system_factory import StorageSystemFactory
 from ..config import Config
 from .logging_util import LoggingUtil
 
@@ -114,7 +114,7 @@ class DecentralizedJobManager:
                 all_requested_jobs = {}
                 for namespace in namespaces:
                     namespace_path = f"requestedJobs/{namespace}"
-                    jobs = await FirebaseSystem.instance().get_children_data_async(namespace_path)
+                    jobs = await StorageSystemFactory.instance().get_children_data_async(namespace_path)
                     if jobs:
                         all_requested_jobs.update(jobs)
                 
@@ -254,23 +254,20 @@ class DecentralizedJobManager:
     async def _reset_orphaned_job_assignment(self, job_id: str):
         """Orphaned job의 assignedPodId를 제거"""
         try:
-            ref = FirebaseSystem.instance().database.reference(self._get_requested_job_path(job_id))
-            job_data = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: ref.get()
-            )
+            storage = StorageSystemFactory.instance()
+            job_path = self._get_requested_job_path(job_id)
+            job_data = storage.get_data(job_path)
             
             if job_data:
-                restored_data = FirebaseSystem.instance().restore_data_from_firebase(job_data)
+                restored_data = storage.restore_data_from_storage(job_data)
                 # assignedPodId를 None으로 설정
                 restored_data['assignedPodId'] = None
                 # status가 processing이면 pending으로 변경
                 if restored_data.get('status') == 'processing':
                     restored_data['status'] = 'pending'
                 
-                sanitized_data = FirebaseSystem.instance().sanitize_data_for_firebase(restored_data)
-                await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: ref.set(sanitized_data)
-                )
+                sanitized_data = storage.sanitize_data_for_storage(restored_data)
+                await storage.set_data_async(job_path, sanitized_data)
                 LoggingUtil.info("decentralized_job_manager", f"✅ Orphaned job {job_id}의 assignedPodId 제거 완료")
         except Exception as e:
             LoggingUtil.exception("decentralized_job_manager", f"Orphaned job {job_id}의 assignedPodId 제거 실패", e)
@@ -318,12 +315,14 @@ class DecentralizedJobManager:
 
     async def atomic_claim_job(self, job_id: str) -> bool:
         """원자적 작업 클레임"""
+        storage = StorageSystemFactory.instance()
+        job_path = self._get_requested_job_path(job_id)
         
         def update_function(current_data):
             if current_data is None:
                 return current_data
 
-            restored_data = FirebaseSystem.instance().restore_data_from_firebase(current_data)
+            restored_data = storage.restore_data_from_storage(current_data)
             
             # assignedPodId가 이미 설정되어 있으면 claim 불가
             if restored_data.get('assignedPodId') is not None:
@@ -334,19 +333,16 @@ class DecentralizedJobManager:
             restored_data['claimedAt'] = time.time()
             restored_data['status'] = 'processing'
             restored_data['lastHeartbeat'] = time.time()
-            return FirebaseSystem.instance().sanitize_data_for_firebase(restored_data)
+            return storage.sanitize_data_for_storage(restored_data)
         
         try:
-            ref = FirebaseSystem.instance().database.reference(self._get_requested_job_path(job_id))
-            transaction_result = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: ref.transaction(update_function)
-            )
+            transaction_result = await storage.transaction_async(job_path, update_function)
             
             if transaction_result is None:
                 LoggingUtil.debug("decentralized_job_manager", f"작업 {job_id} 클레임 시도했으나, 해당 경로에 데이터가 없음.")
                 return False
 
-            final_data = FirebaseSystem.instance().restore_data_from_firebase(transaction_result)
+            final_data = storage.restore_data_from_storage(transaction_result)
             if final_data.get('assignedPodId') == self.pod_id:
                 LoggingUtil.debug("decentralized_job_manager", f"작업 {job_id} 클레임 성공")
                 return True
@@ -410,7 +406,7 @@ class DecentralizedJobManager:
                 heartbeat_data['shutdownRequested'] = True
                 heartbeat_data['acceptingNewJobs'] = False
             
-            await FirebaseSystem.instance().update_data_async(
+            await StorageSystemFactory.instance().update_data_async(
                 self._get_requested_job_path(self.current_job_id),
                 heartbeat_data
             )
@@ -440,7 +436,7 @@ class DecentralizedJobManager:
                 
                 # waitingJobCount가 없거나 기존 값과 다를 경우에만 업데이트
                 if current_waiting_count != waiting_count:
-                    await FirebaseSystem.instance().update_data_async(
+                    await StorageSystemFactory.instance().update_data_async(
                         self._get_requested_job_path(job_id),
                         {'waitingJobCount': waiting_count}
                     )
@@ -482,7 +478,7 @@ class DecentralizedJobManager:
     async def mark_job_as_failed(self, job_id: str):
         """영구적으로 실패한 작업을 'failed' 상태로 표시"""
         try:
-            await FirebaseSystem.instance().update_data_async(
+            await StorageSystemFactory.instance().update_data_async(
                 self._get_requested_job_path(job_id),
                 {
                     'status': 'failed',
@@ -498,7 +494,7 @@ class DecentralizedJobManager:
     async def reset_failed_job(self, job_id: str, current_recovery_count: int):
         """실패한 작업 초기화 및 복구 횟수 증가"""
         try:
-            await FirebaseSystem.instance().update_data_async(
+            await StorageSystemFactory.instance().update_data_async(
                 self._get_requested_job_path(job_id),
                 {
                     'assignedPodId': None,
@@ -526,7 +522,7 @@ class DecentralizedJobManager:
         """작업 삭제 요청 확인 및 처리"""
         try:
             # jobStates에서 삭제 요청된 작업들 조회
-            job_states = await FirebaseSystem.instance().get_children_data_async(Config.get_job_state_root_path())
+            job_states = await StorageSystemFactory.instance().get_children_data_async(Config.get_job_state_root_path())
             
             if not job_states:
                 return
@@ -575,7 +571,7 @@ class DecentralizedJobManager:
                 return
             
             # jobs에서 해당 작업 확인
-            job = FirebaseSystem.instance().get_data(self._get_job_path(job_id))
+            job = StorageSystemFactory.instance().get_data(self._get_job_path(job_id))
             
             if job:
                 # 완료된 작업 삭제 처리
@@ -662,7 +658,7 @@ class DecentralizedJobManager:
             
             # jobStates만 삭제
             job_state_path = Config.get_job_state_path(job_id)
-            success = await FirebaseSystem.instance().delete_data_async(job_state_path)
+            success = await StorageSystemFactory.instance().delete_data_async(job_state_path)
             
             if success:
                 LoggingUtil.debug("decentralized_job_manager", f"orphan jobState {job_id} 삭제 완료")
@@ -678,7 +674,7 @@ class DecentralizedJobManager:
             # 1. requestedJobs 삭제 (필요한 경우)
             if include_requested:
                 requested_job_path = self._get_requested_job_path(job_id)
-                success = await FirebaseSystem.instance().delete_data_async(requested_job_path)
+                success = await StorageSystemFactory.instance().delete_data_async(requested_job_path)
                 if success:
                     LoggingUtil.debug("decentralized_job_manager", f"requestedJobs에서 {job_id} 삭제 완료")
                 else:
@@ -689,7 +685,7 @@ class DecentralizedJobManager:
             
             # 2. jobs 삭제
             job_path = self._get_job_path(job_id)
-            success = await FirebaseSystem.instance().delete_data_async(job_path)
+            success = await StorageSystemFactory.instance().delete_data_async(job_path)
             if success:
                 LoggingUtil.debug("decentralized_job_manager", f"jobs에서 {job_id} 삭제 완료")
             else:
@@ -700,7 +696,7 @@ class DecentralizedJobManager:
             
             # 3. jobStates 삭제
             job_state_path = Config.get_job_state_path(job_id)
-            success = await FirebaseSystem.instance().delete_data_async(job_state_path)
+            success = await StorageSystemFactory.instance().delete_data_async(job_state_path)
             if success:
                 LoggingUtil.debug("decentralized_job_manager", f"jobStates에서 {job_id} 삭제 완료")
             else:

@@ -9,7 +9,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.utils.function_calling import convert_to_openai_function
 from langchain_core.output_parsers import JsonOutputParser
 from project_generator.utils.logging_util import LoggingUtil
-from project_generator.systems.firebase_system import FirebaseSystem
+from project_generator.systems.storage_system_factory import StorageSystemFactory
 from project_generator.utils.refs_trace_util import RefsTraceUtil
 from langgraph.graph import StateGraph, END
 

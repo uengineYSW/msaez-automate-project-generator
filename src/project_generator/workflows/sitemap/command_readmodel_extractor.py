@@ -3,7 +3,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from src.project_generator.utils.logging_util import LoggingUtil
-from src.project_generator.systems.firebase_system import FirebaseSystem
+from src.project_generator.systems.storage_system_factory import StorageSystemFactory
 from src.project_generator.utils.refs_trace_util import RefsTraceUtil
 from src.project_generator.utils.trace_markdown_util import TraceMarkdownUtil
 import json
@@ -493,12 +493,12 @@ CRITICAL INSTRUCTIONS:
             
             # Firebase에 중간 결과 업데이트 (UI에 실시간 반영)
             try:
-                firebase = FirebaseSystem.instance()
+                storage = StorageSystemFactory.instance()
                 job_path = f"jobs/command_readmodel_extractor/{state['job_id']}"
                 
                 # 중간 결과를 Firebase에 업데이트 (outputs 경로에 저장)
                 output_path = f"{job_path}/state/outputs"
-                firebase.update_data(output_path, {
+                storage.update_data(output_path, {
                     "extractedData": merged_data,
                     "progress": progress,
                     "logs": state["logs"] + [f"Chunk {current_chunk_index + 1}/{total_chunks} completed"]

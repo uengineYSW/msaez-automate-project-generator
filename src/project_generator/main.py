@@ -11,8 +11,11 @@ load_dotenv()
 from typing import List
 
 from project_generator.utils import JobUtil, DecentralizedJobManager
-from project_generator.systems.firebase_system import FirebaseSystem
+from project_generator.systems.storage_system_factory import StorageSystemFactory
 from project_generator.config import Config
+
+# StorageSystem 별칭 (호환성)
+StorageSystem = StorageSystemFactory
 from project_generator.run_healcheck_server import run_healcheck_server
 from project_generator.simple_autoscaler import start_autoscaler
 from project_generator.utils.logging_util import LoggingUtil
@@ -65,6 +68,8 @@ async def main():
         job_manager = None
         
         try:
+            # Storage 시스템 초기화
+            StorageSystemFactory.initialize()
             
             # Flask 서버 시작 (첫 실행시에만)
             if flask_thread is None:
@@ -152,7 +157,7 @@ async def process_summarizer_job(job_id: str, complete_job_func: callable):
             job_path = f'jobs/summarizer/{job_id}'
             job_data = await loop.run_in_executor(
                 executor,
-                lambda: FirebaseSystem.instance().get_data(job_path)
+                lambda: StorageSystemFactory.instance().get_data(job_path)
             )
         
         if not job_data:
@@ -171,18 +176,29 @@ async def process_summarizer_job(job_id: str, complete_job_func: callable):
         summaries = result.get('summarizedRequirements', [])
         LoggingUtil.info("main", f"✅ 요약 완료: {len(summaries)}개")
         
-        # 결과를 Firebase에 저장
+        # ★ isCompleted를 마지막에 별도로 저장하여 이벤트 순서 보장
         output_path = f'jobs/summarizer/{job_id}/state/outputs'
+        
+        # 1) isCompleted 제외한 데이터 먼저 저장
+        result_without_completed = {k: v for k, v in result.items() if k != 'isCompleted'}
         await asyncio.to_thread(
-            FirebaseSystem.instance().set_data,
+            StorageSystemFactory.instance().set_data,
             output_path,
-            result
+            result_without_completed
+        )
+        
+        # 2) 짧은 대기 후 isCompleted 저장
+        await asyncio.sleep(0.1)
+        await asyncio.to_thread(
+            StorageSystemFactory.instance().update_data,
+            output_path,
+            {'isCompleted': True}
         )
         
         # requestedJob 삭제
         req_path = f'requestedJobs/summarizer/{job_id}'
         await asyncio.to_thread(
-            FirebaseSystem.instance().delete_data,
+            StorageSystemFactory.instance().delete_data,
             req_path
         )
         
@@ -207,7 +223,7 @@ async def process_summarizer_job(job_id: str, complete_job_func: callable):
             
             output_path = f'jobs/summarizer/{job_id}/state/outputs'
             await asyncio.to_thread(
-                FirebaseSystem.instance().set_data,
+                StorageSystemFactory.instance().set_data,
                 output_path,
                 error_output
             )
@@ -229,7 +245,7 @@ async def process_user_story_job(job_id: str, complete_job_func: callable):
             job_path = f'jobs/user_story_generator/{job_id}'
             job_data = await loop.run_in_executor(
                 executor,
-                lambda: FirebaseSystem.instance().get_data(job_path)
+                lambda: StorageSystemFactory.instance().get_data(job_path)
             )
         
         if not job_data:
@@ -252,17 +268,29 @@ async def process_user_story_job(job_id: str, complete_job_func: callable):
         LoggingUtil.info("main", f"✅ 생성 완료: Stories {len(user_stories)}, Actors {len(actors)}, Rules {len(business_rules)}")
         
         # 결과를 Firebase에 저장 (비동기 처리)
+        # ★ isCompleted를 마지막에 별도로 저장하여 이벤트 순서 보장
         output_path = f'jobs/user_story_generator/{job_id}/state/outputs'
+        
+        # 1) isCompleted 제외한 데이터 먼저 저장
+        result_without_completed = {k: v for k, v in result.items() if k != 'isCompleted'}
         await asyncio.to_thread(
-            FirebaseSystem.instance().set_data,
+            StorageSystemFactory.instance().set_data,
             output_path,
-            result
+            result_without_completed
+        )
+        
+        # 2) 짧은 대기 후 isCompleted 저장 (이벤트 순서 보장)
+        await asyncio.sleep(0.1)
+        await asyncio.to_thread(
+            StorageSystemFactory.instance().update_data,
+            output_path,
+            {'isCompleted': True}
         )
         
         # requestedJob 삭제
         req_path = f'requestedJobs/user_story_generator/{job_id}'
         await asyncio.to_thread(
-            FirebaseSystem.instance().delete_data,
+            StorageSystemFactory.instance().delete_data,
             req_path
         )
         
@@ -282,7 +310,7 @@ async def process_user_story_job(job_id: str, complete_job_func: callable):
                 'logs': [{'timestamp': datetime.now().isoformat(), 'level': 'error', 'message': str(e)}]
             }
             output_path = f'jobs/user_story_generator/{job_id}/state/outputs'
-            FirebaseSystem.instance().set_data(output_path, error_output)
+            StorageSystemFactory.instance().set_data(output_path, error_output)
         except Exception as save_error:
             LoggingUtil.exception("main", f"실패 저장 오류: {job_id}", save_error)
     
@@ -297,7 +325,7 @@ async def process_bounded_context_job(job_id: str, complete_job_func: callable):
         # Job 데이터 로드
         job_path = f'jobs/bounded_context/{job_id}'
         job_data = await asyncio.to_thread(
-            FirebaseSystem.instance().get_data,
+            StorageSystemFactory.instance().get_data,
             job_path
         )
         
@@ -322,7 +350,7 @@ async def process_bounded_context_job(job_id: str, complete_job_func: callable):
         result = await asyncio.to_thread(workflow.run, inputs)
         
         output_path = f'jobs/bounded_context/{job_id}/state/outputs'
-        firebase = FirebaseSystem.instance()
+        storage = StorageSystemFactory.instance()
 
         try:
             final_length = len(json.dumps(result, ensure_ascii=False))
@@ -338,25 +366,36 @@ async def process_bounded_context_job(job_id: str, complete_job_func: callable):
                 'progress': progress_value,
                 'isCompleted': False
             }
-            await firebase.update_data_async(
+            await storage.update_data_async(
                 output_path,
-                firebase.sanitize_data_for_firebase(update_payload)
+                storage.sanitize_data_for_storage(update_payload)
             )
             await asyncio.sleep(1)
 
         result_with_length = copy.deepcopy(result)
         result_with_length['currentGeneratedLength'] = final_length
 
+        # ★ isCompleted를 마지막에 별도로 저장하여 이벤트 순서 보장
+        # 1) isCompleted 제외한 데이터 먼저 저장
+        result_without_completed = {k: v for k, v in result_with_length.items() if k != 'isCompleted'}
         await asyncio.to_thread(
-            firebase.set_data,
+            storage.set_data,
             output_path,
-            firebase.sanitize_data_for_firebase(result_with_length)
+            storage.sanitize_data_for_storage(result_without_completed)
+        )
+        
+        # 2) 짧은 대기 후 isCompleted 저장
+        await asyncio.sleep(0.1)
+        await asyncio.to_thread(
+            storage.update_data,
+            output_path,
+            {'isCompleted': True}
         )
         
         # requestedJob 삭제
         req_path = f'requestedJobs/bounded_context/{job_id}'
         await asyncio.to_thread(
-            FirebaseSystem.instance().delete_data,
+            StorageSystemFactory.instance().delete_data,
             req_path
         )
         
@@ -380,7 +419,7 @@ async def process_bounded_context_job(job_id: str, complete_job_func: callable):
                 'logs': [{'timestamp': datetime.now().isoformat(), 'level': 'error', 'message': str(e)}]
             }
             output_path = f'jobs/bounded_context/{job_id}/state/outputs'
-            FirebaseSystem.instance().set_data(output_path, error_output)
+            StorageSystemFactory.instance().set_data(output_path, error_output)
         except Exception as save_error:
             LoggingUtil.exception("main", f"실패 저장 오류: {job_id}", save_error)
     
@@ -397,7 +436,7 @@ async def process_command_readmodel_job(job_id: str, complete_job_func: callable
         # Job 데이터 로드
         job_path = f'jobs/command_readmodel_extractor/{job_id}'
         job_data = await asyncio.to_thread(
-            FirebaseSystem.instance().get_data,
+            StorageSystemFactory.instance().get_data,
             job_path
         )
         
@@ -429,25 +468,34 @@ async def process_command_readmodel_job(job_id: str, complete_job_func: callable
             {"recursion_limit": 50}
         )
         
-        # 결과 저장
+        # ★ isCompleted를 마지막에 별도로 저장하여 이벤트 순서 보장
         output_path = f'jobs/command_readmodel_extractor/{job_id}/state/outputs'
+        
+        # 1) isCompleted 제외한 데이터 먼저 저장
         await asyncio.to_thread(
-            FirebaseSystem.instance().set_data,
+            StorageSystemFactory.instance().set_data,
             output_path,
             {
                 'extractedData': result.get('extracted_data', {}),
                 'logs': result.get('logs', []),
                 'progress': result.get('progress', 0),
-                'isCompleted': result.get('is_completed', False),
                 'isFailed': result.get('is_failed', False),
                 'error': result.get('error', '')
             }
         )
         
+        # 2) 짧은 대기 후 isCompleted 저장
+        await asyncio.sleep(0.1)
+        await asyncio.to_thread(
+            StorageSystemFactory.instance().update_data,
+            output_path,
+            {'isCompleted': result.get('is_completed', False)}
+        )
+        
         # requestedJob 삭제
         req_path = f'requestedJobs/command_readmodel_extractor/{job_id}'
         await asyncio.to_thread(
-            FirebaseSystem.instance().delete_data,
+            StorageSystemFactory.instance().delete_data,
             req_path
         )
         
@@ -468,7 +516,7 @@ async def process_command_readmodel_job(job_id: str, complete_job_func: callable
                 'logs': [{'timestamp': datetime.now().isoformat(), 'level': 'error', 'message': str(e)}]
             }
             output_path = f'jobs/command_readmodel_extractor/{job_id}/state/outputs'
-            FirebaseSystem.instance().set_data(output_path, error_output)
+            StorageSystemFactory.instance().set_data(output_path, error_output)
         except Exception as save_error:
             LoggingUtil.exception("main", f"실패 저장 오류: {job_id}", save_error)
     
@@ -484,7 +532,7 @@ async def process_sitemap_job(job_id: str, complete_job_func: callable):
         # Job 데이터 로드
         job_path = f'jobs/sitemap_generator/{job_id}'
         job_data = await asyncio.to_thread(
-            FirebaseSystem.instance().get_data,
+            StorageSystemFactory.instance().get_data,
             job_path
         )
         
@@ -519,7 +567,7 @@ async def process_sitemap_job(job_id: str, complete_job_func: callable):
         )
         
         output_path = f'jobs/sitemap_generator/{job_id}/state/outputs'
-        firebase = FirebaseSystem.instance()
+        storage = StorageSystemFactory.instance()
 
         try:
             final_length = len(json.dumps(result.get('site_map', {}), ensure_ascii=False))
@@ -535,9 +583,9 @@ async def process_sitemap_job(job_id: str, complete_job_func: callable):
                 'progress': progress_value,
                 'isCompleted': False
             }
-            await firebase.update_data_async(
+            await storage.update_data_async(
                 output_path,
-                firebase.sanitize_data_for_firebase(update_payload)
+                storage.sanitize_data_for_storage(update_payload)
             )
             await asyncio.sleep(1)
 
@@ -545,22 +593,30 @@ async def process_sitemap_job(job_id: str, complete_job_func: callable):
             'siteMap': result.get('site_map', {}),
             'logs': result.get('logs', []),
             'progress': result.get('progress', 0),
-            'isCompleted': result.get('is_completed', False),
             'isFailed': result.get('is_failed', False),
             'error': result.get('error', ''),
             'currentGeneratedLength': final_length
         }
 
+        # ★ isCompleted를 마지막에 별도로 저장하여 이벤트 순서 보장
         await asyncio.to_thread(
-            firebase.set_data,
+            storage.set_data,
             output_path,
-            firebase.sanitize_data_for_firebase(final_output)
+            storage.sanitize_data_for_storage(final_output)
+        )
+        
+        # 짧은 대기 후 isCompleted 저장
+        await asyncio.sleep(0.1)
+        await asyncio.to_thread(
+            storage.update_data,
+            output_path,
+            {'isCompleted': result.get('is_completed', False)}
         )
         
         # requestedJob 삭제
         req_path = f'requestedJobs/sitemap_generator/{job_id}'
         await asyncio.to_thread(
-            FirebaseSystem.instance().delete_data,
+            StorageSystemFactory.instance().delete_data,
             req_path
         )
         
@@ -581,7 +637,7 @@ async def process_sitemap_job(job_id: str, complete_job_func: callable):
                 'logs': [{'timestamp': datetime.now().isoformat(), 'level': 'error', 'message': str(e)}]
             }
             output_path = f'jobs/sitemap_generator/{job_id}/state/outputs'
-            FirebaseSystem.instance().set_data(output_path, error_output)
+            StorageSystemFactory.instance().set_data(output_path, error_output)
         except Exception as save_error:
             LoggingUtil.exception("main", f"실패 저장 오류: {job_id}", save_error)
     
@@ -597,7 +653,7 @@ async def process_requirements_mapping_job(job_id: str, complete_job_func: calla
         # Job 데이터 로드
         job_path = f'jobs/requirements_mapper/{job_id}'
         job_data = await asyncio.to_thread(
-            FirebaseSystem.instance().get_data,
+            StorageSystemFactory.instance().get_data,
             job_path
         )
         
@@ -630,24 +686,30 @@ async def process_requirements_mapping_job(job_id: str, complete_job_func: calla
         output = {
             'boundedContext': bc_name,
             'requirements': result.get('relevant_requirements', []),
-            'isCompleted': result.get('is_completed', True),
             'progress': result.get('progress', 100),
             'logs': result.get('logs', [])
         }
         
+        # ★ isCompleted를 마지막에 별도로 저장하여 이벤트 순서 보장
         output_path = f'{job_path}/state/outputs'
-        # Firebase에 저장하기 전에 데이터 정제
-        sanitized_output = FirebaseSystem.instance().sanitize_data_for_firebase(output)
+        sanitized_output = StorageSystemFactory.instance().sanitize_data_for_storage(output)
         await asyncio.to_thread(
-            FirebaseSystem.instance().set_data,
+            StorageSystemFactory.instance().set_data,
             output_path,
             sanitized_output
+        )
+        
+        await asyncio.sleep(0.1)
+        await asyncio.to_thread(
+            StorageSystemFactory.instance().update_data,
+            output_path,
+            {'isCompleted': result.get('is_completed', True)}
         )
         
         # 요청 Job 제거
         req_path = f'requestedJobs/requirements_mapper/{job_id}'
         await asyncio.to_thread(
-            FirebaseSystem.instance().delete_data,
+            StorageSystemFactory.instance().delete_data,
             req_path
         )
         
@@ -667,7 +729,7 @@ async def process_requirements_mapping_job(job_id: str, complete_job_func: calla
                 'logs': [{'timestamp': datetime.now().isoformat(), 'level': 'error', 'message': str(e)}]
             }
             output_path = f'jobs/requirements_mapper/{job_id}/state/outputs'
-            FirebaseSystem.instance().set_data(output_path, error_output)
+            StorageSystemFactory.instance().set_data(output_path, error_output)
         except Exception as save_error:
             LoggingUtil.exception("main", f"실패 저장 오류: {job_id}", save_error)
     
@@ -683,7 +745,7 @@ async def process_aggregate_draft_job(job_id: str, complete_job_func: callable):
         # Job 데이터 로드
         job_path = f'jobs/aggregate_draft_generator/{job_id}'
         job_data = await asyncio.to_thread(
-            FirebaseSystem.instance().get_data,
+            StorageSystemFactory.instance().get_data,
             job_path
         )
         
@@ -788,23 +850,30 @@ async def process_aggregate_draft_job(job_id: str, complete_job_func: callable):
             'options': result.get('options', []),
             'defaultOptionIndex': frontend_default_index,
             'conclusions': result.get('conclusions', ''),
-            'isCompleted': result.get('is_completed', True),
             'progress': result.get('progress', 100),
             'logs': result.get('logs', [])
         }
         
+        # ★ isCompleted를 마지막에 별도로 저장하여 이벤트 순서 보장
         output_path = f'{job_path}/state/outputs'
-        sanitized_output = FirebaseSystem.instance().sanitize_data_for_firebase(output)
+        sanitized_output = StorageSystemFactory.instance().sanitize_data_for_storage(output)
         await asyncio.to_thread(
-            FirebaseSystem.instance().set_data,
+            StorageSystemFactory.instance().set_data,
             output_path,
             sanitized_output
+        )
+        
+        await asyncio.sleep(0.1)
+        await asyncio.to_thread(
+            StorageSystemFactory.instance().update_data,
+            output_path,
+            {'isCompleted': result.get('is_completed', True)}
         )
         
         # 요청 Job 제거
         req_path = f'requestedJobs/aggregate_draft_generator/{job_id}'
         await asyncio.to_thread(
-            FirebaseSystem.instance().delete_data,
+            StorageSystemFactory.instance().delete_data,
             req_path
         )
         
@@ -823,7 +892,7 @@ async def process_aggregate_draft_job(job_id: str, complete_job_func: callable):
                 'logs': [{'timestamp': datetime.now().isoformat(), 'level': 'error', 'message': str(e)}]
             }
             output_path = f'jobs/aggregate_draft_generator/{job_id}/state/outputs'
-            FirebaseSystem.instance().set_data(output_path, error_output)
+            StorageSystemFactory.instance().set_data(output_path, error_output)
         except Exception as save_error:
             LoggingUtil.exception("main", f"실패 저장 오류: {job_id}", save_error)
     
@@ -840,7 +909,7 @@ async def process_preview_fields_job(job_id: str, complete_job_func: callable):
         # Job 데이터 로드
         job_path = f'jobs/preview_fields_generator/{job_id}'
         job_data = await asyncio.to_thread(
-            FirebaseSystem.instance().get_data,
+            StorageSystemFactory.instance().get_data,
             job_path
         )
         
@@ -876,27 +945,33 @@ async def process_preview_fields_job(job_id: str, complete_job_func: callable):
         generator = PreviewFieldsGenerator()
         result = generator.run(inputs)
         
-        # 결과를 Firebase에 저장
+        # ★ isCompleted를 마지막에 별도로 저장하여 이벤트 순서 보장
         output = {
             'inference': result.get('inference', ''),
             'aggregateFieldAssignments': result.get('aggregateFieldAssignments', []),
-            'isCompleted': result.get('isCompleted', True),
             'progress': result.get('progress', 100),
             'logs': result.get('logs', [])
         }
         
         output_path = f'{job_path}/state/outputs'
-        sanitized_output = FirebaseSystem.instance().sanitize_data_for_firebase(output)
+        sanitized_output = StorageSystemFactory.instance().sanitize_data_for_storage(output)
         await asyncio.to_thread(
-            FirebaseSystem.instance().set_data,
+            StorageSystemFactory.instance().set_data,
             output_path,
             sanitized_output
+        )
+        
+        await asyncio.sleep(0.1)
+        await asyncio.to_thread(
+            StorageSystemFactory.instance().update_data,
+            output_path,
+            {'isCompleted': result.get('isCompleted', True)}
         )
         
         # 요청 Job 제거
         req_path = f'requestedJobs/preview_fields_generator/{job_id}'
         await asyncio.to_thread(
-            FirebaseSystem.instance().delete_data,
+            StorageSystemFactory.instance().delete_data,
             req_path
         )
         
@@ -914,7 +989,7 @@ async def process_preview_fields_job(job_id: str, complete_job_func: callable):
                 'logs': [{'timestamp': datetime.now().isoformat(), 'level': 'error', 'message': str(e)}]
             }
             output_path = f'jobs/preview_fields_generator/{job_id}/state/outputs'
-            FirebaseSystem.instance().set_data(output_path, error_output)
+            StorageSystemFactory.instance().set_data(output_path, error_output)
         except Exception as save_error:
             LoggingUtil.exception("main", f"실패 저장 오류: {job_id}", save_error)
     
@@ -931,7 +1006,7 @@ async def process_ddl_fields_job(job_id: str, complete_job_func: callable):
         # Job 데이터 로드
         job_path = f'jobs/ddl_fields_generator/{job_id}'
         job_data = await asyncio.to_thread(
-            FirebaseSystem.instance().get_data,
+            StorageSystemFactory.instance().get_data,
             job_path
         )
         
@@ -958,23 +1033,30 @@ async def process_ddl_fields_job(job_id: str, complete_job_func: callable):
         output = {
             'inference': result.get('inference', ''),
             'aggregateFieldAssignments': result.get('result', {}).get('aggregateFieldAssignments', []),
-            'isCompleted': True,
             'progress': 100,
             'logs': [{'timestamp': result.get('timestamp', ''), 'level': 'info', 'message': 'DDL fields assigned successfully'}]
         }
         
+        # ★ isCompleted를 마지막에 별도로 저장하여 이벤트 순서 보장
         output_path = f'{job_path}/state/outputs'
-        sanitized_output = FirebaseSystem.instance().sanitize_data_for_firebase(output)
+        sanitized_output = StorageSystemFactory.instance().sanitize_data_for_storage(output)
         await asyncio.to_thread(
-            FirebaseSystem.instance().set_data,
+            StorageSystemFactory.instance().set_data,
             output_path,
             sanitized_output
+        )
+        
+        await asyncio.sleep(0.1)
+        await asyncio.to_thread(
+            StorageSystemFactory.instance().update_data,
+            output_path,
+            {'isCompleted': True}
         )
         
         # 요청 Job 제거
         req_path = f'requestedJobs/ddl_fields_generator/{job_id}'
         await asyncio.to_thread(
-            FirebaseSystem.instance().delete_data,
+            StorageSystemFactory.instance().delete_data,
             req_path
         )
         
@@ -992,7 +1074,7 @@ async def process_ddl_fields_job(job_id: str, complete_job_func: callable):
                 'logs': [{'timestamp': datetime.now().isoformat(), 'level': 'error', 'message': str(e)}]
             }
             output_path = f'jobs/ddl_fields_generator/{job_id}/state/outputs'
-            FirebaseSystem.instance().set_data(output_path, error_output)
+            StorageSystemFactory.instance().set_data(output_path, error_output)
         except Exception as save_error:
             LoggingUtil.exception("main", f"실패 저장 오류: {job_id}", save_error)
     
@@ -1008,7 +1090,7 @@ async def process_standard_transformation_job(job_id: str, complete_job_func: ca
 
         job_path = f'jobs/standard_transformer/{job_id}'
         job_data = await asyncio.to_thread(
-            FirebaseSystem.instance().get_data,
+            StorageSystemFactory.instance().get_data,
             job_path
         )
 
@@ -1024,37 +1106,37 @@ async def process_standard_transformation_job(job_id: str, complete_job_func: ca
         transformation_session_id = inputs_data.get('transformationSessionId', None)
         user_id = inputs_data.get('userId', None)
 
-        # Firebase 업데이트 콜백 함수 정의
+        # Storage 업데이트 콜백 함수 정의
         output_path = f'{job_path}/state/outputs'
-        firebase = FirebaseSystem.instance()
+        storage = StorageSystemFactory.instance()
         
         # 표준 변환기 실행
         # transformationSessionId가 있으면 디렉토리명으로 사용, 없으면 job_id 사용
         result_dir_name = transformation_session_id if transformation_session_id else job_id
         transformer = AggregateDraftStandardTransformer(enable_rag=True, user_id=user_id)
         
-        async def firebase_update_callback(update_data: dict):
-            """Firebase에 진행 상황 업데이트"""
+        async def storage_update_callback(update_data: dict):
+            """Storage에 진행 상황 업데이트 (Firebase/AceBase 공통)"""
             try:
-                sanitized_data = firebase.sanitize_data_for_firebase(update_data)
-                await firebase.update_data_async(output_path, sanitized_data)
+                sanitized_data = storage.sanitize_data_for_storage(update_data)
+                await storage.update_data_async(output_path, sanitized_data)
             except Exception as e:
-                LoggingUtil.warning("main", f"Firebase 업데이트 실패: {e}")
+                LoggingUtil.warning("main", f"Storage 업데이트 실패: {e}")
         
-        # 동기 함수를 비동기로 래핑하여 콜백 전달
-        def sync_firebase_update(update_data: dict):
-            """동기 함수로 Firebase 업데이트 (transform 내부에서 호출)"""
+        # 동기 함수로 Storage 업데이트 (transform 내부에서 호출)
+        def sync_storage_update(update_data: dict):
+            """동기 함수로 Storage 업데이트 (transform 내부에서 호출)"""
             try:
-                sanitized_data = firebase.sanitize_data_for_firebase(update_data)
-                firebase.update_data(output_path, sanitized_data)
+                sanitized_data = storage.sanitize_data_for_storage(update_data)
+                storage.update_data(output_path, sanitized_data)
             except Exception as e:
-                LoggingUtil.warning("main", f"Firebase 업데이트 실패: {e}")
+                LoggingUtil.warning("main", f"Storage 업데이트 실패: {e}")
         
         result = transformer.transform(
             draft_options, 
             bounded_context, 
             job_id=result_dir_name,
-            firebase_update_callback=sync_firebase_update,
+            firebase_update_callback=sync_storage_update,  # Storage 업데이트 콜백 (Firebase/AceBase 공통)
             transformation_session_id=transformation_session_id  # 세션 ID 전달
         )
 
@@ -1067,7 +1149,6 @@ async def process_standard_transformation_job(job_id: str, complete_job_func: ca
         output = {
             'transformedOptions': transformed_options,
             'transformationLog': transformation_log,
-            'isCompleted': is_completed,
             'progress': 100
         }
         
@@ -1076,17 +1157,25 @@ async def process_standard_transformation_job(job_id: str, complete_job_func: ca
         if error:
             output['error'] = error
 
+        # ★ isCompleted를 마지막에 별도로 저장하여 이벤트 순서 보장
         output_path = f'{job_path}/state/outputs'
-        sanitized_output = FirebaseSystem.instance().sanitize_data_for_firebase(output)
+        sanitized_output = StorageSystemFactory.instance().sanitize_data_for_storage(output)
         await asyncio.to_thread(
-            FirebaseSystem.instance().set_data,
+            StorageSystemFactory.instance().set_data,
             output_path,
             sanitized_output
+        )
+        
+        await asyncio.sleep(0.1)
+        await asyncio.to_thread(
+            StorageSystemFactory.instance().update_data,
+            output_path,
+            {'isCompleted': is_completed}
         )
 
         req_path = f'requestedJobs/standard_transformer/{job_id}'
         await asyncio.to_thread(
-            FirebaseSystem.instance().delete_data,
+            StorageSystemFactory.instance().delete_data,
             req_path
         )
 
@@ -1107,9 +1196,9 @@ async def process_standard_transformation_job(job_id: str, complete_job_func: ca
                 'progress': 0,
                 'error': str(e)
             }
-            sanitized_output = FirebaseSystem.instance().sanitize_data_for_firebase(error_output)
+            sanitized_output = StorageSystemFactory.instance().sanitize_data_for_storage(error_output)
             await asyncio.to_thread(
-                FirebaseSystem.instance().set_data,
+                StorageSystemFactory.instance().set_data,
                 output_path,
                 sanitized_output
             )
@@ -1126,7 +1215,7 @@ async def process_standard_transformation_job(job_id: str, complete_job_func: ca
                     # transformation_session_id가 있으면 같은 세션의 다른 BC가 남아있는지 확인
                     # requestedJobs/standard_transformer에서 같은 세션의 다른 job 확인
                     requested_jobs = await asyncio.to_thread(
-                        FirebaseSystem.instance().get_children_data,
+                                StorageSystemFactory.instance().get_children_data,
                         'requestedJobs/standard_transformer'
                     )
                     
@@ -1140,7 +1229,7 @@ async def process_standard_transformation_job(job_id: str, complete_job_func: ca
                             # 다른 job의 transformationSessionId 확인
                             other_job_path = f'jobs/standard_transformer/{other_job_id}'
                             other_job_data_full = await asyncio.to_thread(
-                                FirebaseSystem.instance().get_data,
+                                StorageSystemFactory.instance().get_data,
                                 other_job_path
                             )
                             
@@ -1171,7 +1260,7 @@ async def process_traceability_job(job_id: str, complete_job_func: callable):
 
         job_path = f'jobs/traceability_generator/{job_id}'
         job_data = await asyncio.to_thread(
-            FirebaseSystem.instance().get_data,
+            StorageSystemFactory.instance().get_data,
             job_path
         )
 
@@ -1276,22 +1365,29 @@ async def process_traceability_job(job_id: str, complete_job_func: callable):
         output = {
             'inference': result.get('inference', ''),
             'draftTraceMap': result.get('draftTraceMap', {}),
-            'isCompleted': True,
             'progress': 100,
             'logs': [{'timestamp': datetime.now().isoformat(), 'level': 'info', 'message': 'Traceability mapping completed'}]
         }
 
+        # ★ isCompleted를 마지막에 별도로 저장하여 이벤트 순서 보장
         output_path = f'{job_path}/state/outputs'
-        sanitized_output = FirebaseSystem.instance().sanitize_data_for_firebase(output)
+        sanitized_output = StorageSystemFactory.instance().sanitize_data_for_storage(output)
         await asyncio.to_thread(
-            FirebaseSystem.instance().set_data,
+            StorageSystemFactory.instance().set_data,
             output_path,
             sanitized_output
+        )
+        
+        await asyncio.sleep(0.1)
+        await asyncio.to_thread(
+            StorageSystemFactory.instance().update_data,
+            output_path,
+            {'isCompleted': True}
         )
 
         req_path = f'requestedJobs/traceability_generator/{job_id}'
         await asyncio.to_thread(
-            FirebaseSystem.instance().delete_data,
+            StorageSystemFactory.instance().delete_data,
             req_path
         )
 
@@ -1308,7 +1404,7 @@ async def process_traceability_job(job_id: str, complete_job_func: callable):
                 'logs': [{'timestamp': datetime.now().isoformat(), 'level': 'error', 'message': str(e)}]
             }
             output_path = f'jobs/traceability_generator/{job_id}/state/outputs'
-            FirebaseSystem.instance().set_data(output_path, error_output)
+            StorageSystemFactory.instance().set_data(output_path, error_output)
         except Exception as save_error:
             LoggingUtil.exception("main", f"실패 저장 오류: {job_id}", save_error)
     finally:
@@ -1322,7 +1418,7 @@ async def process_ddl_extractor_job(job_id: str, complete_job_func: callable):
 
         job_path = f'jobs/ddl_extractor/{job_id}'
         job_data = await asyncio.to_thread(
-            FirebaseSystem.instance().get_data,
+            StorageSystemFactory.instance().get_data,
             job_path
         )
 
@@ -1344,22 +1440,29 @@ async def process_ddl_extractor_job(job_id: str, complete_job_func: callable):
         output = {
             'inference': result.get('inference', ''),
             'ddlFieldRefs': result.get('ddlFieldRefs', []),
-            'isCompleted': True,
             'progress': 100,
             'logs': [{'timestamp': datetime.now().isoformat(), 'level': 'info', 'message': 'DDL extraction completed'}]
         }
 
+        # ★ isCompleted를 마지막에 별도로 저장하여 이벤트 순서 보장
         output_path = f'{job_path}/state/outputs'
-        sanitized_output = FirebaseSystem.instance().sanitize_data_for_firebase(output)
+        sanitized_output = StorageSystemFactory.instance().sanitize_data_for_storage(output)
         await asyncio.to_thread(
-            FirebaseSystem.instance().set_data,
+            StorageSystemFactory.instance().set_data,
             output_path,
             sanitized_output
+        )
+        
+        await asyncio.sleep(0.1)
+        await asyncio.to_thread(
+            StorageSystemFactory.instance().update_data,
+            output_path,
+            {'isCompleted': True}
         )
 
         req_path = f'requestedJobs/ddl_extractor/{job_id}'
         await asyncio.to_thread(
-            FirebaseSystem.instance().delete_data,
+            StorageSystemFactory.instance().delete_data,
             req_path
         )
 
@@ -1376,7 +1479,7 @@ async def process_ddl_extractor_job(job_id: str, complete_job_func: callable):
                 'logs': [{'timestamp': datetime.now().isoformat(), 'level': 'error', 'message': str(e)}]
             }
             output_path = f'jobs/ddl_extractor/{job_id}/state/outputs'
-            FirebaseSystem.instance().set_data(output_path, error_output)
+            StorageSystemFactory.instance().set_data(output_path, error_output)
         except Exception as save_error:
             LoggingUtil.exception("main", f"실패 저장 오류: {job_id}", save_error)
     finally:
@@ -1390,7 +1493,7 @@ async def process_requirements_validator_job(job_id: str, complete_job_func: cal
 
         job_path = f'jobs/requirements_validator/{job_id}'
         job_data = await asyncio.to_thread(
-            FirebaseSystem.instance().get_data,
+            StorageSystemFactory.instance().get_data,
             job_path
         )
 
@@ -1411,7 +1514,7 @@ async def process_requirements_validator_job(job_id: str, complete_job_func: cal
         result = generator.generate(input_data)
 
         output_path = f'{job_path}/state/outputs'
-        firebase = FirebaseSystem.instance()
+        storage = StorageSystemFactory.instance()
 
         content = result.get('content', {}) or {}
         final_length = 0
@@ -1429,31 +1532,40 @@ async def process_requirements_validator_job(job_id: str, complete_job_func: cal
                 'progress': progress_value,
                 'isCompleted': False
             }
-            await firebase.update_data_async(
+            await storage.update_data_async(
                 output_path,
-                firebase.sanitize_data_for_firebase(update_payload)
+                storage.sanitize_data_for_storage(update_payload)
             )
             await asyncio.sleep(1)
 
         output = {
             'type': result.get('type', 'ANALYSIS_RESULT'),
             'content': result.get('content', {}),
-            'isCompleted': True,
             'progress': 100,
             'currentGeneratedLength': final_length,
             'logs': [{'timestamp': datetime.now().isoformat(), 'level': 'info', 'message': 'Requirements validation completed'}]
         }
 
-        sanitized_output = FirebaseSystem.instance().sanitize_data_for_firebase(output)
+        # ★ isCompleted를 마지막에 별도로 저장하여 이벤트 순서 보장
+        # 1) isCompleted 제외한 데이터 먼저 저장
+        sanitized_output = StorageSystemFactory.instance().sanitize_data_for_storage(output)
         await asyncio.to_thread(
-            FirebaseSystem.instance().set_data,
+            StorageSystemFactory.instance().set_data,
             output_path,
             sanitized_output
+        )
+        
+        # 2) 짧은 대기 후 isCompleted 저장 (이벤트 순서 보장)
+        await asyncio.sleep(0.1)
+        await asyncio.to_thread(
+            StorageSystemFactory.instance().update_data,
+            output_path,
+            {'isCompleted': True}
         )
 
         req_path = f'requestedJobs/requirements_validator/{job_id}'
         await asyncio.to_thread(
-            FirebaseSystem.instance().delete_data,
+            StorageSystemFactory.instance().delete_data,
             req_path
         )
 
@@ -1470,7 +1582,7 @@ async def process_requirements_validator_job(job_id: str, complete_job_func: cal
                 'logs': [{'timestamp': datetime.now().isoformat(), 'level': 'error', 'message': str(e)}]
             }
             output_path = f'jobs/requirements_validator/{job_id}/state/outputs'
-            FirebaseSystem.instance().set_data(output_path, error_output)
+            StorageSystemFactory.instance().set_data(output_path, error_output)
         except Exception as save_error:
             LoggingUtil.exception("main", f"실패 저장 오류: {job_id}", save_error)
     finally:

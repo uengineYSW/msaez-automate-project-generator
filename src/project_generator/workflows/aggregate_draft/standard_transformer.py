@@ -156,7 +156,11 @@ class AggregateDraftStandardTransformer:
     
     def _download_user_standards_from_firebase(self, user_id: str) -> Optional[Path]:
         """
-        Firebase Storage에서 사용자별 표준 문서를 다운로드하여 knowledge_base/company_standards/{user_id}/ 경로에 저장
+        사용자별 표준 문서를 가져옴 (로컬 파일 시스템 우선, 없으면 Firebase Storage에서 다운로드)
+        
+        프로세스:
+        1. 로컬 파일 시스템 확인: knowledge_base/company_standards/{user_id}/ 경로에 파일이 있으면 사용
+        2. 없으면 Firebase Storage에서 다운로드하여 knowledge_base/company_standards/{user_id}/ 경로에 저장
         
         프로세스가 동작하는 동안 임시적으로 저장되며, 프로세스 종료 시 정리됩니다.
         같은 사용자 ID의 경우 한 번만 다운로드하여 재사용합니다.
@@ -165,15 +169,35 @@ class AggregateDraftStandardTransformer:
             user_id: 사용자 ID
             
         Returns:
-            다운로드한 문서가 저장된 경로 (Path 객체), 실패 시 None
+            문서가 저장된 경로 (Path 객체), 실패 시 None
         """
-        # 이미 다운로드된 경우 스킵
+        # knowledge_base/company_standards/{user_id}/ 경로 확인
+        user_standards_dir = Config.COMPANY_STANDARDS_PATH / user_id
+        
+        # ★ 1) 로컬 파일 시스템에 이미 파일이 있는지 확인 (AceBase 로컬 환경 대응)
+        if user_standards_dir.exists() and any(user_standards_dir.iterdir()):
+            # 지원하는 파일 형식이 있는지 확인 (.xlsx, .xls, .pptx, .ppt)
+            supported_extensions = ['.xlsx', '.xls', '.pptx', '.ppt']
+            has_supported_file = any(
+                file_path.suffix.lower() in supported_extensions 
+                for file_path in user_standards_dir.iterdir() 
+                if file_path.is_file()
+            )
+            
+            if has_supported_file:
+                LoggingUtil.info("StandardTransformer", 
+                    f"📁 로컬 파일 시스템에서 사용자({user_id}) 표준 문서 발견: {user_standards_dir}")
+                # 다운로드 완료 표시 (재사용을 위해)
+                AggregateDraftStandardTransformer._user_documents_downloaded.add(user_id)
+                return user_standards_dir
+        
+        # 이미 다운로드된 경우 스킵 (이전 다운로드 세션에서)
         if user_id in AggregateDraftStandardTransformer._user_documents_downloaded:
-            user_standards_dir = Config.COMPANY_STANDARDS_PATH / user_id
             if user_standards_dir.exists() and any(user_standards_dir.iterdir()):
                 LoggingUtil.info("StandardTransformer", f"♻️  사용자({user_id}) 표준 문서 재사용 (이미 다운로드됨)")
                 return user_standards_dir
         
+        # ★ 2) 로컬에 없으면 Firebase Storage에서 다운로드 (Firebase 환경)
         try:
             from firebase_admin import storage as firebase_storage
             
@@ -266,16 +290,32 @@ class AggregateDraftStandardTransformer:
         """
         사용자별 표준 문서 임시 디렉토리 정리
         프로세스 종료 시 호출하여 임시 파일들을 삭제
+        
+        AceBase 환경: 파일은 영구 저장되므로 삭제하지 않음 (Vector Store만 정리)
+        Firebase 환경: Firebase Storage에서 다운로드한 임시 파일이므로 모두 삭제
         """
+        # STORAGE_TYPE 확인
+        from project_generator.systems.storage_system_factory import StorageSystemFactory
+        storage_type = StorageSystemFactory.get_storage_type()
+        is_acebase = storage_type == 'acebase'
+        
         if self.user_standards_path and self.user_standards_path.exists():
             try:
-                # Vector Store도 함께 삭제
-                if self.user_vectorstore_path and Path(self.user_vectorstore_path).exists():
-                    shutil.rmtree(self.user_vectorstore_path, ignore_errors=True)
-                
-                # 사용자별 문서 디렉토리 삭제
-                shutil.rmtree(self.user_standards_path, ignore_errors=True)
-                LoggingUtil.info("StandardTransformer", f"🧹 사용자 표준 문서 정리 완료: {self.user_standards_path}")
+                if is_acebase:
+                    # AceBase 환경: Vector Store만 정리, 파일은 유지
+                    if self.user_vectorstore_path and Path(self.user_vectorstore_path).exists():
+                        shutil.rmtree(self.user_vectorstore_path, ignore_errors=True)
+                        LoggingUtil.info("StandardTransformer", f"🧹 Vector Store 정리 완료 (파일 유지): {self.user_vectorstore_path}")
+                    else:
+                        LoggingUtil.info("StandardTransformer", f"ℹ️  AceBase 환경: 표준 문서 파일 유지 (삭제 안 함): {self.user_standards_path}")
+                else:
+                    # Firebase 환경: Vector Store와 파일 모두 삭제
+                    if self.user_vectorstore_path and Path(self.user_vectorstore_path).exists():
+                        shutil.rmtree(self.user_vectorstore_path, ignore_errors=True)
+                    
+                    # 사용자별 문서 디렉토리 삭제
+                    shutil.rmtree(self.user_standards_path, ignore_errors=True)
+                    LoggingUtil.info("StandardTransformer", f"🧹 사용자 표준 문서 정리 완료: {self.user_standards_path}")
             except Exception as e:
                 LoggingUtil.warning("StandardTransformer", f"⚠️  사용자 표준 문서 정리 중 오류: {e}")
     

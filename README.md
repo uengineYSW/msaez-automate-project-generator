@@ -4,7 +4,11 @@ MSA-EZ Event Storming 자동화를 위한 LangGraph 기반 UserStory 생성 백�
 
 ## 📋 개요
 
-이 프로젝트는 Firebase Job Queue를 통해 프론트엔드와 통신하며, LangGraph 워크플로우를 사용하여 요구사항으로부터 User Story, Actor, Business Rule을 추출합니다.
+이 프로젝트는 Firebase 또는 AceBase Job Queue를 통해 프론트엔드와 통신하며, LangGraph 워크플로우를 사용하여 요구사항으로부터 User Story, Actor, Business Rule을 추출합니다.
+
+**지원하는 배포 환경:**
+- 🔥 **Firebase**: 클라우드 배포 (Kubernetes)
+- 🏠 **AceBase**: 설치형(온프레미스) 환경 (로컬 실행)
 
 ### 주요 기능
 
@@ -17,24 +21,40 @@ MSA-EZ Event Storming 자동화를 위한 LangGraph 기반 UserStory 생성 백�
 - ✅ **DDL Fields Generator**: DDL 기반 필드 매핑
 - ✅ **Requirements Mapper**: 요구사항 매핑
 - ✅ **Requirements Validator**: 요구사항 검증
-- 🔥 **Firebase Integration**: Job Queue 방식의 비동기 처리
+- 🔥 **Storage Integration**: Firebase 또는 AceBase Job Queue 방식의 비동기 처리
 - 🚀 **Auto Scaling**: Kubernetes 환경에서 자동 스케일링
 - 📊 **Health Check**: `/ok` 엔드포인트 제공
 
 ## 🏗️ 아키텍처
 
+### 클라우드 배포 (Firebase)
 ```
 Frontend (Vue.js)
     ↓ (Firebase)
     ↓ jobs/user_story_generator/{jobId}
     ↓
-Backend (Python/LangGraph)
+Backend (Python/LangGraph) - Kubernetes Pod
     ├── DecentralizedJobManager (Job 감시)
     ├── UserStoryWorkflow (LangGraph)
     │   ├── RAG Retriever
     │   ├── LLM (GPT-4o)
     │   └── Output Parser
     └── Firebase System (결과 저장)
+```
+
+### 설치형 환경 (AceBase)
+```
+Frontend (Vue.js)
+    ↓ (AceBase - localhost:5757)
+    ↓ requestedJobs/user_story_generator/{jobId}
+    ↓
+Backend (Python/LangGraph) - 로컬 실행
+    ├── DecentralizedJobManager (Job 감시)
+    ├── UserStoryWorkflow (LangGraph)
+    │   ├── RAG Retriever
+    │   ├── LLM (GPT-4o)
+    │   └── Output Parser
+    └── AceBase System (결과 저장)
 ```
 
 ## 🛠️ 설치 및 실행
@@ -54,10 +74,10 @@ pip install -r requirements.txt
 
 `.env` 파일을 생성하고 다음 내용을 추가:
 
+**기본 설정 (공통):**
 ```bash
-# Firebase
-FIREBASE_DATABASE_URL=https://YOUR-PROJECT.firebaseio.com
-FIREBASE_CREDENTIALS_PATH=./firebase-credentials.json
+# Storage Type (firebase 또는 acebase)
+STORAGE_TYPE=acebase  # 또는 firebase
 
 # OpenAI
 OPENAI_API_KEY=sk-...
@@ -65,14 +85,34 @@ OPENAI_API_KEY=sk-...
 # Server
 PORT=2024
 IS_LOCAL_RUN=true
-
-# Job Namespace
-NAMESPACE=user_story_generator
+NAMESPACE=project_generator
 ```
 
-### 3. Firebase 인증 설정
+**AceBase 사용 시 추가:**
+```bash
+# AceBase 설정
+ACEBASE_HOST=127.0.0.1
+ACEBASE_PORT=5757
+ACEBASE_DB_NAME=mydb
+ACEBASE_HTTPS=false
+ACEBASE_USERNAME=admin
+ACEBASE_PASSWORD=75sdDSFg37w5
+```
 
-Firebase 콘솔에서 서비스 계정 키를 다운로드하여 `firebase-credentials.json`으로 저장
+**Firebase 사용 시 추가:**
+```bash
+# Firebase 설정
+FIREBASE_DATABASE_URL=https://YOUR-PROJECT.firebaseio.com
+FIREBASE_SERVICE_ACCOUNT_PATH=./firebase-credentials.json
+FIREBASE_STORAGE_BUCKET=YOUR-BUCKET.appspot.com
+```
+
+**참고**: `.env` 파일에 모든 환경 변수를 넣어두고 `STORAGE_TYPE`만 변경해도 됩니다. 사용하지 않는 설정은 무시됩니다.
+
+### 3. 인증 설정
+
+- **AceBase**: 인증 불필요 (로컬 실행)
+- **Firebase**: Firebase 콘솔에서 서비스 계정 키를 다운로드하여 `firebase-credentials.json`으로 저장
 
 ### 4. 서버 실행
 
@@ -92,6 +132,16 @@ python -m project_generator.main
 ```bash
 curl http://localhost:2024/ok
 ```
+
+## 📦 배포 방법
+
+### 설치형(온프레미스) 환경
+- 로컬에서 직접 실행 (이 README 참고)
+- Kubernetes 배포 불필요
+
+### 클라우드 배포
+- `README-DEPLOYMENT.md` 참고
+- Firebase 또는 AceBase 전용 배포 가능
 
 ## 📁 프로젝트 구조
 

@@ -7,8 +7,9 @@ import concurrent.futures
 from functools import partial
 
 from ..utils.logging_util import LoggingUtil
+from .storage_system import StorageSystem
 
-class FirebaseSystem:
+class FirebaseSystem(StorageSystem):
     _instance: Optional['FirebaseSystem'] = None
     _initialized: bool = False
     
@@ -50,7 +51,7 @@ class FirebaseSystem:
                 init_options['storageBucket'] = storage_bucket
             firebase_admin.initialize_app(cred, init_options)
         
-        self.database = db
+        self._database = db
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
         # watch 기능을 위한 리스너 관리
         self._listeners: Dict[str, Any] = {}
@@ -666,6 +667,10 @@ class FirebaseSystem:
     # 데이터 정제 메서드들
     # =============================================================================
 
+    def sanitize_data_for_storage(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Storage 업로드를 위해 데이터 정제 (Firebase 호환)"""
+        return self.sanitize_data_for_firebase(data)
+
     def sanitize_data_for_firebase(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Firebase 업로드를 위해 null/빈 배열/빈 객체를 기본값으로 변환
@@ -691,6 +696,10 @@ class FirebaseSystem:
                 return value
         
         return {k: process_value(v) for k, v in data.items()}
+
+    def restore_data_from_storage(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Storage에서 가져온 데이터를 원본 형태로 복원 (Firebase 호환)"""
+        return self.restore_data_from_firebase(data)
 
     def restore_data_from_firebase(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -718,7 +727,24 @@ class FirebaseSystem:
         
         return {k: process_value(v) for k, v in data.items()}
 
-FirebaseSystem.initialize(
-    service_account_path=os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH"),
-    database_url=os.getenv("FIREBASE_DATABASE_URL")
-)
+    # =============================================================================
+    # 트랜잭션 메서드들
+    # =============================================================================
+    
+    def transaction(self, path: str, update_function: Callable) -> Any:
+        """원자적 트랜잭션 실행"""
+        ref = self._get_firebase_reference(path)
+        return ref.transaction(update_function)
+    
+    async def transaction_async(self, path: str, update_function: Callable) -> Any:
+        """원자적 트랜잭션 비동기 실행"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            self._executor,
+            lambda: self.transaction(path, update_function)
+        )
+    
+    @property
+    def database(self):
+        """데이터베이스 참조 객체 (호환성용)"""
+        return self._database

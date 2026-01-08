@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 import atexit
 
-from ..systems.firebase_system import FirebaseSystem
+from ..systems.storage_system_factory import StorageSystemFactory
 from ..models import State
 from ..utils import JsonUtil
 from ..config import Config
@@ -273,7 +273,7 @@ class JobUtil:
             update_request (UpdateRequest): 업데이트 요청
         """
         try:
-            firebase_system = FirebaseSystem.instance()
+            storage_system = StorageSystemFactory.instance()
             job_id = update_request.state["inputs"]["jobId"]
             
             # 기본 경로 구성
@@ -291,19 +291,19 @@ class JobUtil:
             
             # 업데이트 타입에 따른 처리
             if update_request.operation_type == "set":
-                firebase_system.set_data(path, data)
+                storage_system.set_data(path, data)
             elif update_request.operation_type == "update":
                 if JobUtil.previous_data_job_id == job_id:
-                    firebase_system.conditional_update_data(path, data, JobUtil.previous_data_state)
+                    storage_system.conditional_update_data(path, data, JobUtil.previous_data_state)
                     JobUtil.previous_data_job_id = job_id
                     JobUtil.previous_data_state = data
                 else:
-                    firebase_system.update_data(path, data)
+                    storage_system.update_data(path, data)
                     JobUtil.previous_data_job_id = job_id
                     JobUtil.previous_data_state = data
         
             elif update_request.operation_type == "delete":
-                firebase_system.delete_data(path)
+                storage_system.delete_data(path)
 
         except Exception as e:
             LoggingUtil.exception("job_util", f"[Firebase Update Error] Job ID {update_request.state['inputs']['jobId']} 업데이트 실행 실패", e)

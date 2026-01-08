@@ -3,7 +3,7 @@ import time
 import os
 from kubernetes import client, config
 
-from .systems import FirebaseSystem
+from .systems.storage_system_factory import StorageSystemFactory
 from .config import Config
 from .utils.logging_util import LoggingUtil
 
@@ -260,7 +260,7 @@ class SimpleAutoScaler:
         """대기 중인 작업 수를 비동기로 계산"""
         try:
             # Firebase에서 현재 작업 데이터 조회
-            requested_jobs = await FirebaseSystem.instance().get_children_data_async(
+            requested_jobs = await StorageSystemFactory.instance().get_children_data_async(
                 Config.get_requested_job_root_path()
             )
             
@@ -284,7 +284,7 @@ class SimpleAutoScaler:
         """처리 중인 작업 수를 비동기로 계산"""
         try:
             # Firebase에서 현재 작업 데이터 조회
-            requested_jobs = await FirebaseSystem.instance().get_children_data_async(
+            requested_jobs = await StorageSystemFactory.instance().get_children_data_async(
                 Config.get_requested_job_root_path()
             )
             
