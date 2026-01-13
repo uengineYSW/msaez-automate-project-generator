@@ -4,6 +4,7 @@ import threading
 import json
 import math
 import copy
+import os
 from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
@@ -75,8 +76,9 @@ async def main():
             if flask_thread is None:
                 flask_thread = threading.Thread(target=run_healcheck_server, daemon=True)
                 flask_thread.start()
-                LoggingUtil.info("main", "Flask 서버가 포트 2024에서 시작되었습니다.")
-                LoggingUtil.info("main", "헬스체크 엔드포인트: http://localhost:2024/ok")
+                flask_port = os.getenv('FLASK_PORT', '2025')
+                LoggingUtil.info("main", f"Flask 서버가 포트 {flask_port}에서 시작되었습니다.")
+                LoggingUtil.info("main", f"헬스체크 엔드포인트: http://localhost:{flask_port}/ok")
 
             if restart_count > 0:
                 LoggingUtil.info("main", f"메인 함수 재시작 중... (재시작 횟수: {restart_count})")

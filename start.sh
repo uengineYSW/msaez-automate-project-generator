@@ -16,8 +16,8 @@ if [ ! -f ".env" ]; then
 fi
 
 echo "🚀 Project Generator 서버를 시작합니다..."
-echo "📍 포트: 2024"
-echo "📊 Health Check: http://localhost:2024/ok"
+echo "📍 포트: ${FLASK_PORT:-2025} (환경 변수 FLASK_PORT로 변경 가능)"
+echo "📊 Health Check: http://localhost:${FLASK_PORT:-2025}/ok"
 echo ""
 
 # 가상환경 활성화 및 서버 시작

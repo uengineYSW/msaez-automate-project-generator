@@ -66,8 +66,8 @@ Backend (Python/LangGraph) - 로컬 실행
 python3 -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 
-# 의존성 설치
-pip install -r requirements.txt
+# 의존성 설치 (pyproject.toml 기반)
+pip install -e .
 ```
 
 ### 2. 환경 변수 설정
@@ -83,7 +83,7 @@ STORAGE_TYPE=acebase  # 또는 firebase
 OPENAI_API_KEY=sk-...
 
 # Server
-PORT=2024
+FLASK_PORT=2025  # Flask 서버 포트 (기본값: 2025, langgraph dev와 충돌 방지)
 IS_LOCAL_RUN=true
 NAMESPACE=project_generator
 ```
@@ -95,8 +95,9 @@ ACEBASE_HOST=127.0.0.1
 ACEBASE_PORT=5757
 ACEBASE_DB_NAME=mydb
 ACEBASE_HTTPS=false
-ACEBASE_USERNAME=admin
-ACEBASE_PASSWORD=75sdDSFg37w5
+# 인증은 선택적 (설정하지 않으면 인증 없이 진행)
+ACEBASE_USERNAME=admin  # 선택적
+ACEBASE_PASSWORD=75sdDSFg37w5  # 선택적 (AceBase의 ADMIN_PASSWORD 환경변수와 일치해야 함, 프로덕션 환경에서는 반드시 변경 권장)
 ```
 
 **Firebase 사용 시 추가:**
@@ -111,7 +112,7 @@ FIREBASE_STORAGE_BUCKET=YOUR-BUCKET.appspot.com
 
 ### 3. 인증 설정
 
-- **AceBase**: 인증 불필요 (로컬 실행)
+- **AceBase**: 인증은 선택적 (환경 변수 `ACEBASE_USERNAME`, `ACEBASE_PASSWORD`가 설정되지 않으면 인증 없이 진행)
 - **Firebase**: Firebase 콘솔에서 서비스 계정 키를 다운로드하여 `firebase-credentials.json`으로 저장
 
 ### 4. 서버 실행
@@ -126,11 +127,24 @@ export PYTHONPATH="$(pwd)/src"
 python -m project_generator.main
 ```
 
-서버가 `http://localhost:2024`에서 실행됩니다.
+서버가 `http://localhost:2025`에서 실행됩니다. (기본 포트, `FLASK_PORT` 환경 변수로 변경 가능)
 
 **Health Check:**
 ```bash
-curl http://localhost:2024/ok
+curl http://localhost:2025/ok
+```
+
+**표준 문서 API (AceBase 환경용):**
+```bash
+# 파일 목록 조회
+curl "http://localhost:2025/api/standard-documents/list?userId=YOUR_USER_ID"
+
+# 파일 업로드
+curl -X POST -F "files=@document.xlsx" -F "userId=YOUR_USER_ID" \
+  http://localhost:2025/api/standard-documents/upload
+
+# 파일 삭제
+curl -X DELETE "http://localhost:2025/api/standard-documents/delete?userId=YOUR_USER_ID&filename=document.xlsx"
 ```
 
 ## 📦 배포 방법
@@ -176,7 +190,9 @@ backend-generators/
     │       ├── standard_indexer.py  # 표준 문서 인덱서
     │       └── standard_rag_service.py  # 표준 RAG 서비스
     ├── systems/
-    │   └── firebase_system.py  # Firebase 연동
+    │   ├── firebase_system.py  # Firebase 연동
+    │   ├── acebase_system.py  # AceBase 연동
+    │   └── storage_system_factory.py  # Storage 시스템 팩토리 (Strategy 패턴)
     ├── utils/
     │   ├── decentralized_job_manager.py  # Job Queue 관리
     │   ├── job_util.py          # Job 유틸리티
@@ -275,7 +291,7 @@ await storage.setObject(`requestedJobs/user_story_generator/${jobId}`, {
 docker build -t user-story-generator:latest .
 
 # 실행
-docker run -p 2024:2024 \
+docker run -p 2025:2025 \
   -e FIREBASE_DATABASE_URL=... \
   -e OPENAI_API_KEY=... \
   user-story-generator:latest
@@ -296,8 +312,18 @@ kubectl scale deployment user-story-generator --replicas=3
 ### Health Check
 
 ```bash
-curl http://localhost:2024/ok
+curl http://localhost:2025/ok
 ```
+
+### 표준 문서 API (AceBase 환경)
+
+AceBase 로컬 환경에서 표준 문서(Excel, PowerPoint)를 관리하는 API:
+
+- **목록 조회**: `GET /api/standard-documents/list?userId={userId}`
+- **파일 업로드**: `POST /api/standard-documents/upload` (multipart/form-data)
+- **파일 삭제**: `DELETE /api/standard-documents/delete?userId={userId}&filename={filename}`
+
+파일은 `knowledge_base/company_standards/{userId}/` 경로에 저장됩니다.
 
 ### 로그
 

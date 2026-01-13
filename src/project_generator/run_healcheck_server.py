@@ -139,23 +139,50 @@ def list_standard_documents():
         # 사용자별 디렉토리 경로
         user_standards_dir = Config.COMPANY_STANDARDS_PATH / user_id
         
-        if not user_standards_dir.exists():
-            return jsonify({'files': []}), 200
+        # 디버깅: 경로 정보 로깅
+        logging.info(f'[Standard Documents List] userId: {user_id}')
+        logging.info(f'[Standard Documents List] COMPANY_STANDARDS_PATH: {Config.COMPANY_STANDARDS_PATH}')
+        logging.info(f'[Standard Documents List] user_standards_dir: {user_standards_dir}')
+        logging.info(f'[Standard Documents List] user_standards_dir.exists(): {user_standards_dir.exists()}')
         
-        # 지원하는 파일 형식
+        # 사용자별 디렉토리가 없으면, 루트 디렉토리도 확인 (기존 파일이 루트에 있을 수 있음)
+        files = []
         allowed_extensions = {'.xlsx', '.xls', '.pptx', '.ppt'}
         
-        files = []
-        for file_path in user_standards_dir.iterdir():
-            if file_path.is_file() and file_path.suffix.lower() in allowed_extensions:
-                stat = file_path.stat()
-                files.append({
-                    'name': file_path.name,
-                    'size': stat.st_size,
-                    'uploadedAt': datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                    'path': str(file_path)
-                })
+        # 1) 사용자별 디렉토리 확인
+        if user_standards_dir.exists():
+            logging.info(f'[Standard Documents List] Checking user-specific directory: {user_standards_dir}')
+            for file_path in user_standards_dir.iterdir():
+                if file_path.is_file() and file_path.suffix.lower() in allowed_extensions:
+                    stat = file_path.stat()
+                    files.append({
+                        'name': file_path.name,
+                        'size': stat.st_size,
+                        'uploadedAt': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                        'path': str(file_path)
+                    })
+            logging.info(f'[Standard Documents List] Found {len(files)} files in user directory')
         
+        # 2) 루트 디렉토리도 확인 (기존 파일이 user_id 없이 저장된 경우)
+        if Config.COMPANY_STANDARDS_PATH.exists():
+            logging.info(f'[Standard Documents List] Checking root directory: {Config.COMPANY_STANDARDS_PATH}')
+            root_files_count = 0
+            for file_path in Config.COMPANY_STANDARDS_PATH.iterdir():
+                # 디렉토리는 제외하고 파일만 확인
+                if file_path.is_file() and file_path.suffix.lower() in allowed_extensions:
+                    # 이미 사용자 디렉토리에서 찾은 파일이 아니면 추가
+                    if not any(f['name'] == file_path.name for f in files):
+                        stat = file_path.stat()
+                        files.append({
+                            'name': file_path.name,
+                            'size': stat.st_size,
+                            'uploadedAt': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                            'path': str(file_path)
+                        })
+                        root_files_count += 1
+            logging.info(f'[Standard Documents List] Found {root_files_count} additional files in root directory')
+        
+        logging.info(f'[Standard Documents List] Total files found: {len(files)}')
         return jsonify({'files': files}), 200
         
     except Exception as e:
@@ -205,4 +232,6 @@ def run_healcheck_server():
     health_filter = HealthCheckFilter()
     werkzeug_logger.addFilter(health_filter)
     
-    app.run(host='0.0.0.0', port=2024, debug=False, use_reloader=False)
+    # 포트는 환경 변수로 설정 가능 (기본값: 2025, langgraph dev와 충돌 방지)
+    port = int(os.getenv('FLASK_PORT', '2025'))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
