@@ -77,8 +77,9 @@ async def main():
                 flask_thread = threading.Thread(target=run_healcheck_server, daemon=True)
                 flask_thread.start()
                 flask_port = os.getenv('FLASK_PORT', '2025')
+                flask_host = os.getenv('FLASK_HOST', 'localhost')
                 LoggingUtil.info("main", f"Flask 서버가 포트 {flask_port}에서 시작되었습니다.")
-                LoggingUtil.info("main", f"헬스체크 엔드포인트: http://localhost:{flask_port}/ok")
+                LoggingUtil.info("main", f"헬스체크 엔드포인트: http://{flask_host}:{flask_port}/ok")
 
             if restart_count > 0:
                 LoggingUtil.info("main", f"메인 함수 재시작 중... (재시작 횟수: {restart_count})")
