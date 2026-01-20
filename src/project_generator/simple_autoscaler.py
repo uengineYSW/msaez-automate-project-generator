@@ -32,8 +32,12 @@ class SimpleAutoScaler:
             # Pod 내부에서 실행되는 경우
             config.load_incluster_config()
         except:
-            # 로컬에서 테스트하는 경우
-            config.load_kube_config()
+            try:
+                # 로컬에서 테스트하는 경우
+                config.load_kube_config()
+            except:
+                # Docker 환경 등 Kubernetes가 없는 경우
+                raise Exception("Kubernetes config not available")
         
         self.apps_v1 = client.AppsV1Api()
         self.core_v1 = client.CoreV1Api()
@@ -312,9 +316,29 @@ class SimpleAutoScaler:
             return 0
 
 # 전역 AutoScaler 인스턴스
-# 로컬 환경에서는 autoscaler 초기화하지 않음
-if os.getenv("ENVIRONMENT") != "development":
-    autoscaler = SimpleAutoScaler()
+# Docker 환경 또는 로컬 환경에서는 autoscaler 초기화하지 않음
+def _should_init_autoscaler():
+    # Docker 환경 감지 (docker-compose.yml에서 POD_ID를 "docker-pod"로 설정)
+    pod_id = os.getenv("POD_ID", "")
+    if pod_id == "docker-pod":
+        return False
+    
+    # 로컬 실행 환경
+    if os.getenv("IS_LOCAL_RUN") == "true":
+        return False
+    
+    # Development 환경
+    if os.getenv("ENVIRONMENT") == "development":
+        return False
+    
+    return True
+
+if _should_init_autoscaler():
+    try:
+        autoscaler = SimpleAutoScaler()
+    except Exception as e:
+        LoggingUtil.warning("simple_autoscaler", f"AutoScaler 초기화 실패 (Kubernetes 없음): {e}")
+        autoscaler = None
 else:
     autoscaler = None
 
