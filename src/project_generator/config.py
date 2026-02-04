@@ -66,6 +66,15 @@ class Config:
     def autoscaler_target_jobs_per_pod() -> int:
         return int(os.getenv('AUTO_SCALE_TARGET_JOBS_PER_POD', '1'))
     
+    @staticmethod
+    def max_concurrent_jobs() -> int:
+        """단일 인스턴스에서 동시에 처리할 수 있는 최대 작업 수"""
+        return int(os.getenv('MAX_CONCURRENT_JOBS', '3'))
+    
+    @staticmethod
+    def job_polling_interval() -> float:
+        """작업 모니터링 폴링 간격 (초)"""
+        return float(os.getenv('JOB_POLLING_INTERVAL', '2.0'))
 
     @staticmethod
     def get_log_level() -> str:
